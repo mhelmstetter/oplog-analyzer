@@ -25,6 +25,7 @@ public class OplogAnalyzer {
     
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new HashMap<OplogEntryKey, EntryAccumulator>();
     private MongoClient mongoClient;
+    private boolean stop = false;
 
     public OplogAnalyzer(String uri) {
         mongoClient = new MongoClient(new MongoClientURI(uri));
@@ -57,13 +58,20 @@ public class OplogAnalyzer {
                 accum.addExecution(doc.size());
             }
 
-            //System.out.println(ns + " " + doc.size());
+            if (stop) {
+                mongoClient.close();
+                break;
+            }
         }
+    }
+    
+    protected void stop() {
+        this.stop = true;
     }
     
     public void report() {
         //System.out.println(String.format("%-55s %-15s %10s %10s %10s %10s %10s %10s %10s %10s %10s %10s %12s %12s %10s %10s", "Namespace", "operation", "count", "min_ms", "max_ms", "avg_ms", "95%_ms", "total_s", "avgKeysEx", "avgDocsEx", "95%_keysEx", "95%_DocsEx", "totKeysEx(K)", "totDocsEx(K)", "avgReturn", "exRetRatio"));
-        System.out.println(String.format("%-55s %5s %10s %10s %10s", "Namespace", "op", "min", "max", "avg"));
+        System.out.println(String.format("%-55s %5s %10s %10s %10s %10s", "Namespace", "op", "count", "min", "max", "avg"));
         for (EntryAccumulator acc : accumulators.values()) {
             System.out.println(acc);
         }
@@ -105,8 +113,14 @@ public class OplogAnalyzer {
     public static void main(String[] args) throws UnknownHostException {
         CommandLine line = initializeAndParseCommandLineOptions(args);
         String uri = line.getOptionValue("c");
-        OplogAnalyzer analyzer = new OplogAnalyzer(uri);
+        final OplogAnalyzer analyzer = new OplogAnalyzer(uri);
+        Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
+            public void run() {
+            }
+        }));
         analyzer.process();
         analyzer.report();
     }
+
+
 }
