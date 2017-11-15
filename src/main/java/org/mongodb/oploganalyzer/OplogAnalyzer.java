@@ -43,7 +43,8 @@ public class OplogAnalyzer {
         System.out.println(lastTimestamp);
 
         Document query = new Document("ts", new Document("$lt", lastTimestamp));
-        for (RawBsonDocument doc : oplog.find(query)) {
+        for (RawBsonDocument doc : oplog.find(query).noCursorTimeout(true)) {
+            
             BsonString ns = (BsonString) doc.get("ns");
             BsonString op = (BsonString) doc.get("op");
 
@@ -55,11 +56,13 @@ public class OplogAnalyzer {
                     accum = new EntryAccumulator(key);
                     accumulators.put(key, accum);
                 }
-                accum.addExecution(doc.size());
+                long len = doc.getByteBuffer().asNIO().array().length;
+                accum.addExecution(len);
             }
 
             if (stop) {
                 mongoClient.close();
+                report();
                 break;
             }
         }
@@ -71,7 +74,7 @@ public class OplogAnalyzer {
     
     public void report() {
         //System.out.println(String.format("%-55s %-15s %10s %10s %10s %10s %10s %10s %10s %10s %10s %10s %12s %12s %10s %10s", "Namespace", "operation", "count", "min_ms", "max_ms", "avg_ms", "95%_ms", "total_s", "avgKeysEx", "avgDocsEx", "95%_keysEx", "95%_DocsEx", "totKeysEx(K)", "totDocsEx(K)", "avgReturn", "exRetRatio"));
-        System.out.println(String.format("%-55s %5s %10s %10s %10s %10s", "Namespace", "op", "count", "min", "max", "avg"));
+        System.out.println(String.format("%-55s %5s %10s %10s %10s %10s %20s", "Namespace", "op", "count", "min", "max", "avg", "total"));
         for (EntryAccumulator acc : accumulators.values()) {
             System.out.println(acc);
         }
@@ -116,6 +119,7 @@ public class OplogAnalyzer {
         final OplogAnalyzer analyzer = new OplogAnalyzer(uri);
         Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
             public void run() {
+                analyzer.stop();
             }
         }));
         analyzer.process();

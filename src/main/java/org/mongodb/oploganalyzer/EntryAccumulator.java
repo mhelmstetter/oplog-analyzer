@@ -28,7 +28,7 @@ public class EntryAccumulator {
     }
     
     public String toString() {
-        return String.format("%-55s %5s %10d %10d %10d %10d", key.ns, key.op, count, min, max, total/count);
+        return String.format("%-55s %5s %10d %10d %10d %10d %20d", key.ns, key.op, count, min, max, total/count, total);
         
     }
 
