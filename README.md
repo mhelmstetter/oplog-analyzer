@@ -1,5 +1,5 @@
 # oplog-analyzer
-MongoDB oplog analysis utility. Reads the MongoDB oplog up until the last operation and prints the count, min, max, average, and total bson size of each oplog entry by the namespace and op type.
+MongoDB oplog analysis utility. Reads the MongoDB oplog up until the last operation and prints the count, min, max, average, and total bson size of each oplog entry by the namespace and op type. This can be useful to gather a better understanding of the write patterns of a given application, and also to analyze and troubleshoot excessive oplog usage.
 
 # Running
 * OplogAnalyzer.jar is included in the bin directory, or build the jar using `mvn package`
