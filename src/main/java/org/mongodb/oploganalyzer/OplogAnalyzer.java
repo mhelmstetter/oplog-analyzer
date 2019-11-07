@@ -60,7 +60,7 @@ public class OplogAnalyzer {
                 }
                 long len = doc.getByteBuffer().asNIO().array().length;
                 if (len >= threshold) {
-                    System.out.println(String.format("Doc exceeded threshold: ", doc));
+                    System.out.println(String.format("Doc exceeded threshold: %s", doc));
                 }
                 accum.addExecution(len);
             }
