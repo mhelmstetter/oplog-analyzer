@@ -26,9 +26,11 @@ public class OplogAnalyzer {
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new HashMap<OplogEntryKey, EntryAccumulator>();
     private MongoClient mongoClient;
     private boolean stop = false;
+    private Long threshold;
 
-    public OplogAnalyzer(String uri) {
+    public OplogAnalyzer(String uri, Long threshold) {
         mongoClient = new MongoClient(new MongoClientURI(uri));
+        this.threshold = threshold;
     }
 
     public void process() {
@@ -57,11 +59,15 @@ public class OplogAnalyzer {
                     accumulators.put(key, accum);
                 }
                 long len = doc.getByteBuffer().asNIO().array().length;
+                if (len >= threshold) {
+                    System.out.println(String.format("Doc exceeded threshold: ", doc));
+                }
                 accum.addExecution(len);
             }
 
             if (stop) {
-                mongoClient.close();
+                //mongoClient.close();
+                System.out.println(accumulators.size());
                 report();
                 break;
             }
@@ -90,6 +96,11 @@ public class OplogAnalyzer {
                 .withDescription(  "mongodb connection string uri" )
                 .withLongOpt("uri")
                 .create( "c" ));
+        options.addOption(OptionBuilder.withArgName("log ops size threshold (bytes)")
+                .hasArgs()
+                .withDescription(  "log operations >= this size" )
+                .withLongOpt("threshold")
+                .create( "t" ));
 
         CommandLineParser parser = new GnuParser();
         CommandLine line = null;
@@ -116,9 +127,15 @@ public class OplogAnalyzer {
     public static void main(String[] args) throws UnknownHostException {
         CommandLine line = initializeAndParseCommandLineOptions(args);
         String uri = line.getOptionValue("c");
-        final OplogAnalyzer analyzer = new OplogAnalyzer(uri);
+        String thresholdStr = line.getOptionValue("t");
+        Long threshold = null;
+        if (thresholdStr != null) {
+            threshold = Long.parseLong(thresholdStr);
+        }
+        final OplogAnalyzer analyzer = new OplogAnalyzer(uri, threshold);
         Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
             public void run() {
+                System.out.println("**** SHUTDOWN *****");
                 analyzer.stop();
             }
         }));
