@@ -11,8 +11,10 @@ import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
+import org.bson.BsonDocument;
 import org.bson.BsonString;
 import org.bson.BsonTimestamp;
+import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.RawBsonDocument;
 
@@ -60,7 +62,19 @@ public class OplogAnalyzer {
                 }
                 long len = doc.getByteBuffer().asNIO().array().length;
                 if (len >= threshold) {
-                    System.out.println(String.format("Doc exceeded threshold: %s", doc));
+                    BsonDocument o = (BsonDocument)doc.get("o");
+                    if (o != null) {
+                        BsonValue id = o.get("_id");
+                        if (id != null) {
+                            System.out.println(String.format("%s doc exceeded threshold: %s", ns, id));
+                        } else {
+                            System.out.println("doc exceeded threshold, but no _id in the 'o' field");
+                        }
+                        
+                    } else {
+                        System.out.println("doc exceeded threshold, but no 'o' field in the olog record");
+                    }
+                    
                 }
                 accum.addExecution(len);
             }
