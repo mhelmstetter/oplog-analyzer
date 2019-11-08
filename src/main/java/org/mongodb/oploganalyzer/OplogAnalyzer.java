@@ -63,7 +63,15 @@ public class OplogAnalyzer {
                 long len = doc.getByteBuffer().asNIO().array().length;
                 if (len >= threshold) {
                     BsonDocument o = (BsonDocument)doc.get("o");
-                    if (o != null) {
+                    BsonDocument o2 = (BsonDocument)doc.get("o2");
+                    if (o2 != null) {
+                        BsonValue id = o2.get("_id");
+                        if (id != null) {
+                            System.out.println(String.format("%s doc exceeded threshold: %s", ns, id));
+                        } else {
+                            System.out.println("doc exceeded threshold, but no _id in the 'o2' field");
+                        }
+                    } else if (o != null) {
                         BsonValue id = o.get("_id");
                         if (id != null) {
                             System.out.println(String.format("%s doc exceeded threshold: %s", ns, id));
@@ -72,7 +80,7 @@ public class OplogAnalyzer {
                         }
                         
                     } else {
-                        System.out.println("doc exceeded threshold, but no 'o' field in the olog record");
+                        System.out.println("doc exceeded threshold, but no 'o' or 'o2' field in the olog record");
                     }
                     
                 }
