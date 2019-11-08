@@ -1,5 +1,6 @@
 package org.mongodb.oploganalyzer;
 
+import java.io.StringWriter;
 import java.net.UnknownHostException;
 import java.util.HashMap;
 import java.util.Map;
@@ -11,12 +12,17 @@ import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
+import org.bson.BsonBinary;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
 import org.bson.BsonTimestamp;
+import org.bson.BsonType;
 import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.RawBsonDocument;
+import org.bson.json.JsonMode;
+import org.bson.json.JsonWriter;
+import org.bson.json.JsonWriterSettings;
 
 import com.mongodb.MongoClient;
 import com.mongodb.MongoClientURI;
@@ -67,14 +73,14 @@ public class OplogAnalyzer {
                     if (o2 != null) {
                         BsonValue id = o2.get("_id");
                         if (id != null) {
-                            System.out.println(String.format("%s doc exceeded threshold: %s", ns, id));
+                            debug(ns, id);
                         } else {
                             System.out.println("doc exceeded threshold, but no _id in the 'o2' field");
                         }
                     } else if (o != null) {
                         BsonValue id = o.get("_id");
                         if (id != null) {
-                            System.out.println(String.format("%s doc exceeded threshold: %s", ns, id));
+                            debug(ns, id);
                         } else {
                             System.out.println("doc exceeded threshold, but no _id in the 'o' field");
                         }
@@ -94,6 +100,30 @@ public class OplogAnalyzer {
                 break;
             }
         }
+    }
+    
+    private static final char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
+    public static String bytesToHex(byte[] bytes) {
+        char[] hexChars = new char[bytes.length * 2];
+        for (int j = 0; j < bytes.length; j++) {
+            int v = bytes[j] & 0xFF;
+            hexChars[j * 2] = HEX_ARRAY[v >>> 4];
+            hexChars[j * 2 + 1] = HEX_ARRAY[v & 0x0F];
+        }
+        return new String(hexChars);
+    }
+    
+    private void debug(BsonString ns, BsonValue id) {
+        String idVal = null;
+        if (id.getBsonType().equals(BsonType.BINARY)) {
+            BsonBinary b = (BsonBinary)id;
+            JsonWriter jsonWriter = new JsonWriter(new StringWriter(), new JsonWriterSettings(JsonMode.SHELL, false));
+            jsonWriter.writeBinaryData(b);
+            idVal = jsonWriter.getWriter().toString();
+        } else {
+            idVal = id.toString();
+        }
+        System.out.println(String.format("%s doc exceeded threshold: {_id: %s }", ns, idVal));
     }
     
     protected void stop() {
@@ -150,7 +180,7 @@ public class OplogAnalyzer {
         CommandLine line = initializeAndParseCommandLineOptions(args);
         String uri = line.getOptionValue("c");
         String thresholdStr = line.getOptionValue("t");
-        Long threshold = null;
+        Long threshold = Long.MAX_VALUE;
         if (thresholdStr != null) {
             threshold = Long.parseLong(thresholdStr);
         }
