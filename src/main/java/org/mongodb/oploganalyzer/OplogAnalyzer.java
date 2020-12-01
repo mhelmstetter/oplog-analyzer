@@ -2,6 +2,9 @@ package org.mongodb.oploganalyzer;
 
 import java.io.StringWriter;
 import java.net.UnknownHostException;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -31,14 +34,19 @@ import com.mongodb.client.MongoDatabase;
 
 public class OplogAnalyzer {
     
+    //private final static DateFormat df1 = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+    private final static DateFormat df1  = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
+    
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new HashMap<OplogEntryKey, EntryAccumulator>();
     private MongoClient mongoClient;
     private boolean stop = false;
     private Long threshold;
+    private Date startTime;
 
-    public OplogAnalyzer(String uri, Long threshold) {
+    public OplogAnalyzer(String uri, Long threshold, Date startTime) {
         mongoClient = new MongoClient(new MongoClientURI(uri));
         this.threshold = threshold;
+        this.startTime = startTime;
     }
 
     public void process() {
@@ -47,51 +55,69 @@ public class OplogAnalyzer {
         MongoCollection<RawBsonDocument> oplog = db.getCollection("oplog.rs", RawBsonDocument.class);
 
         RawBsonDocument lastOplogEntry = oplog.find().sort(new Document("$natural", -1)).first();
+        
+        BsonTimestamp start = null;
+        if (startTime != null) {
+            int epoch = (int)startTime.getTime();
+            start = new BsonTimestamp(epoch, 0);
+        }
+       
 
         BsonTimestamp lastTimestamp = (BsonTimestamp) lastOplogEntry.get("ts");
 
         System.out.println(lastTimestamp);
 
-        Document query = new Document("ts", new Document("$lt", lastTimestamp));
+        Document query = null;
+        if (start != null) {
+            query = new Document("ts", new Document("$lt", lastTimestamp).append("$gt", start));
+        } else {
+            query = new Document("ts", new Document("$lt", lastTimestamp));
+        }
+        
         for (RawBsonDocument doc : oplog.find(query).noCursorTimeout(true)) {
             
-            BsonString ns = (BsonString) doc.get("ns");
+            String ns = ((BsonString) doc.get("ns")).getValue();
             BsonString op = (BsonString) doc.get("op");
+            String opType = op.getValue();
 
             // ignore no-op
-            if (!op.getValue().equals("n")) {
-                OplogEntryKey key = new OplogEntryKey(ns.getValue(), op.getValue());
-                EntryAccumulator accum = accumulators.get(key);
-                if (accum == null) {
-                    accum = new EntryAccumulator(key);
-                    accumulators.put(key, accum);
-                }
-                long len = doc.getByteBuffer().asNIO().array().length;
-                if (len >= threshold) {
-                    BsonDocument o = (BsonDocument)doc.get("o");
-                    BsonDocument o2 = (BsonDocument)doc.get("o2");
-                    if (o2 != null) {
-                        BsonValue id = o2.get("_id");
-                        if (id != null) {
-                            debug(ns, id);
-                        } else {
-                            System.out.println("doc exceeded threshold, but no _id in the 'o2' field");
-                        }
-                    } else if (o != null) {
-                        BsonValue id = o.get("_id");
-                        if (id != null) {
-                            debug(ns, id);
-                        } else {
-                            System.out.println("doc exceeded threshold, but no _id in the 'o' field");
-                        }
-                        
+            if (opType.equals("n") && ns.equals("")) {
+            	continue;
+            }
+            
+            
+            OplogEntryKey key = new OplogEntryKey(ns, opType);
+            EntryAccumulator accum = accumulators.get(key);
+            if (accum == null) {
+                accum = new EntryAccumulator(key);
+                accumulators.put(key, accum);
+            }
+            long len = doc.getByteBuffer().asNIO().array().length;
+            if (len >= threshold) {
+                BsonDocument o = (BsonDocument)doc.get("o");
+                BsonDocument o2 = (BsonDocument)doc.get("o2");
+                if (o2 != null) {
+                    BsonValue id = o2.get("_id");
+                    if (id != null) {
+                        debug(ns, id);
                     } else {
-                        System.out.println("doc exceeded threshold, but no 'o' or 'o2' field in the olog record");
+                        System.out.println("doc exceeded threshold, but no _id in the 'o2' field");
+                    }
+                } else if (o != null) {
+                    BsonValue id = o.get("_id");
+                    if (id != null) {
+                        debug(ns, id);
+                    } else {
+                        System.out.println("doc exceeded threshold, but no _id in the 'o' field");
                     }
                     
+                } else {
+                    System.out.println("doc exceeded threshold, but no 'o' or 'o2' field in the olog record");
                 }
-                accum.addExecution(len);
+                
             }
+            accum.addExecution(len);
+            
 
             if (stop) {
                 //mongoClient.close();
@@ -113,7 +139,7 @@ public class OplogAnalyzer {
         return new String(hexChars);
     }
     
-    private void debug(BsonString ns, BsonValue id) {
+    private void debug(String ns, BsonValue id) {
         String idVal = null;
         if (id.getBsonType().equals(BsonType.BINARY)) {
             BsonBinary b = (BsonBinary)id;
@@ -132,7 +158,7 @@ public class OplogAnalyzer {
     
     public void report() {
         //System.out.println(String.format("%-55s %-15s %10s %10s %10s %10s %10s %10s %10s %10s %10s %10s %12s %12s %10s %10s", "Namespace", "operation", "count", "min_ms", "max_ms", "avg_ms", "95%_ms", "total_s", "avgKeysEx", "avgDocsEx", "95%_keysEx", "95%_DocsEx", "totKeysEx(K)", "totDocsEx(K)", "avgReturn", "exRetRatio"));
-        System.out.println(String.format("%-55s %5s %10s %10s %10s %10s %20s", "Namespace", "op", "count", "min", "max", "avg", "total"));
+        System.out.println(String.format("%-80s %5s %10s %10s %10s %10s %20s", "Namespace", "op", "count", "min", "max", "avg", "total"));
         for (EntryAccumulator acc : accumulators.values()) {
             System.out.println(acc);
         }
@@ -153,6 +179,11 @@ public class OplogAnalyzer {
                 .withDescription(  "log operations >= this size" )
                 .withLongOpt("threshold")
                 .create( "t" ));
+        options.addOption(OptionBuilder.withArgName("start time")
+                .hasArgs()
+                .withDescription(  "start time (yyyy-MM-ddTHH:mm:ssZ)" )
+                .withLongOpt("startTime")
+                .create( "s" ));
 
         CommandLineParser parser = new GnuParser();
         CommandLine line = null;
@@ -176,7 +207,7 @@ public class OplogAnalyzer {
         System.exit(-1);
     }
 
-    public static void main(String[] args) throws UnknownHostException {
+    public static void main(String[] args) throws UnknownHostException, java.text.ParseException {
         CommandLine line = initializeAndParseCommandLineOptions(args);
         String uri = line.getOptionValue("c");
         String thresholdStr = line.getOptionValue("t");
@@ -184,7 +215,15 @@ public class OplogAnalyzer {
         if (thresholdStr != null) {
             threshold = Long.parseLong(thresholdStr);
         }
-        final OplogAnalyzer analyzer = new OplogAnalyzer(uri, threshold);
+        
+        Date startTime = null;
+        String startTimeStr = line.getOptionValue("s");
+        if (startTimeStr != null) {
+            //startTime = Date.from( Instant.parse( "2014-12-12T10:39:40Z" ));
+            startTime = df1.parse(startTimeStr);
+        }
+        
+        final OplogAnalyzer analyzer = new OplogAnalyzer(uri, threshold, startTime);
         Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
             public void run() {
                 System.out.println("**** SHUTDOWN *****");
