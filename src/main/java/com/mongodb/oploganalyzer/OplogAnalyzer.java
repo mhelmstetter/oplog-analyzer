@@ -383,8 +383,10 @@ public class OplogAnalyzer {
         if (sheetName == null) {
         	if (startTime != null) {
         		sheetName = String.format("%s %s", dbName, simpleDateFormat.format(startTime));
-        	} else {
+        	} else if (dbName != null) {
         		sheetName = dbName;
+        	} else {
+        		sheetName = "sheet1";
         	}
         }
         analyzer.setSheetName(sheetName);
