@@ -291,7 +291,7 @@ public class OplogAnalyzer {
     private static CommandLine initializeAndParseCommandLineOptions(String[] args) {
         Options options = new Options();
         options.addOption(OptionBuilder.withArgName("connection uri")
-                .hasArgs()
+                .hasArg()
                 .isRequired()
                 .withDescription(  "mongodb connection string uri" )
                 .withLongOpt("uri")
