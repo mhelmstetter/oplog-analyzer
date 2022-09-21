@@ -53,12 +53,12 @@ public class TailingOplogAnalyzer {
 		MongoCursor<RawBsonDocument> cursor = null;
 		MongoCollection<RawBsonDocument> oplog = local.getCollection("oplog.rs", RawBsonDocument.class);
 
-		BsonTimestamp shardTimestamp = getLatestOplogTimestamp();
-		Bson query = gte("ts", shardTimestamp);
+		//BsonTimestamp shardTimestamp = getLatestOplogTimestamp();
+		//Bson query = gte("ts", shardTimestamp);
 		
 		int i = 0;
 		try {
-			cursor = oplog.find(query).sort(new Document("$natural", 1)).noCursorTimeout(true)
+			cursor = oplog.find().sort(new Document("$natural", 1)).noCursorTimeout(true)
 					.cursorType(CursorType.TailableAwait).iterator();
 			while (cursor.hasNext() && !shutdown) {
 
