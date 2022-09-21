@@ -40,6 +40,7 @@ public class TailingOplogAnalyzer {
 	
 	private MongoClient mongoClient;
 	private boolean shutdown = false;
+	private Integer limit;
 	private Map<OplogEntryKey, EntryAccumulator> accumulators = new HashMap<OplogEntryKey, EntryAccumulator>();
 	
 	
@@ -86,6 +87,11 @@ public class TailingOplogAnalyzer {
 				if (i++ % 5000 == 0) {
 					System.out.print(".");
 				}
+				
+				if (limit != null && i >= limit) {
+					stop();
+                    report();
+				}
 			}
 
 		} catch (MongoInterruptedException e) {
@@ -128,6 +134,11 @@ public class TailingOplogAnalyzer {
                 .withDescription(  "mongodb connection string uri" )
                 .withLongOpt("uri")
                 .create( "c" ));
+        options.addOption(OptionBuilder.withArgName("limit")
+                .hasArgs()
+                .withDescription(  "only examine limit number of oplog entries" )
+                .withLongOpt("limit")
+                .create( "l" ));
 
         CommandLineParser parser = new GnuParser();
         CommandLine line = null;
@@ -158,21 +169,31 @@ public class TailingOplogAnalyzer {
         
         final TailingOplogAnalyzer analyzer = new TailingOplogAnalyzer(uri);
         
+        if (line.hasOption("l")) {
+        	String limitStr = line.getOptionValue("l");
+        	analyzer.setLimit(Integer.parseInt(limitStr));
+        	
+        } else {
+        	Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
+                public void run() {
+                	System.out.println();
+                    System.out.println("**** SHUTDOWN *****");
+                    analyzer.stop();
+                    analyzer.report();
+                }
+            }));
+        }
         
-        Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
-            public void run() {
-            	System.out.println();
-                System.out.println("**** SHUTDOWN *****");
-                analyzer.stop();
-                analyzer.report();
-            }
-        }));
         analyzer.run();
     }
 
 	protected void stop() {
 		shutdown = true;
 		
+	}
+
+	public void setLimit(Integer limit) {
+		this.limit = limit;
 	}
 
 }
