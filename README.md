@@ -5,6 +5,11 @@ MongoDB oplog analysis utility. Reads the MongoDB oplog up until the last operat
 * OplogAnalyzer.jar is included in the bin directory, or build the jar using `mvn package`
 * To run:
     `java -jar OplogAnalyzer.jar -c mongodb://localhost:27017`
+    
+Additionally, there is a `TailingOplogAnalyzer`, which may work better for very large/active oplogs. Rather than scanning the entire oplog, it
+will tail the oplog when the program starts until the program is ended using CTRL-C. Before exiting, the program will print the final report.
+* To run:
+    `java -cp OplogAnalyzer.jar com.mongodb.oploganalyzer.TailingOplogAnalyzer -c mongodb://localhost:27017`
 
 # Build
 mvn package
