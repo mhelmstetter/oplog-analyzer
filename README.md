@@ -11,6 +11,9 @@ will tail the oplog when the program starts until the program is ended using CTR
 * To run:
     `java -cp OplogAnalyzer.jar com.mongodb.oploganalyzer.TailingOplogAnalyzer -c mongodb://localhost:27017`
 
+Optionally, start and end times can be specified:
+    `java -cp OplogAnalyzer.jar com.mongodb.oploganalyzer.TailingOplogAnalyzer -c mongodb://localhost:27017 -s "2023-01-19T14:00:00.000Z" -e "2023-01-19T14:30:00.000Z"`
+
 # Build
 mvn package
 
