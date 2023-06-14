@@ -69,7 +69,7 @@ public class TailingOplogAnalyzer {
 				BsonString op = (BsonString) doc.get("op");
 				String opType = op.getValue();
 				
-	            if (opType.equals("n") || ns.startsWith("config.")) {
+	            if (ns.startsWith("config.")) {
 	            	continue;
 	            }
 
