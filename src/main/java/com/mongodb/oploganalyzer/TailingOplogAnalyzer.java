@@ -7,6 +7,7 @@ import static com.mongodb.client.model.Filters.ne;
 import static com.mongodb.client.model.Projections.include;
 
 import java.io.IOException;
+import java.io.StringWriter;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -18,11 +19,18 @@ import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
+import org.bson.BsonBinary;
+import org.bson.BsonDocument;
 import org.bson.BsonString;
 import org.bson.BsonTimestamp;
+import org.bson.BsonType;
+import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.RawBsonDocument;
 import org.bson.conversions.Bson;
+import org.bson.json.JsonMode;
+import org.bson.json.JsonWriter;
+import org.bson.json.JsonWriterSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,12 +49,26 @@ public class TailingOplogAnalyzer {
 	private MongoClient mongoClient;
 	private boolean shutdown = false;
 	private Integer limit;
+	private Long threshold;
 	private Map<OplogEntryKey, EntryAccumulator> accumulators = new HashMap<OplogEntryKey, EntryAccumulator>();
 	
 	
 	public TailingOplogAnalyzer(String uri) {
 		mongoClient = new MongoClient(new MongoClientURI(uri));
 	}
+	
+	private void debug(String ns, BsonValue id) {
+        String idVal = null;
+        if (id.getBsonType().equals(BsonType.BINARY)) {
+            BsonBinary b = (BsonBinary)id;
+            JsonWriter jsonWriter = new JsonWriter(new StringWriter(), new JsonWriterSettings(JsonMode.SHELL, false));
+            jsonWriter.writeBinaryData(b);
+            idVal = jsonWriter.getWriter().toString();
+        } else {
+            idVal = id.toString();
+        }
+        System.out.println(String.format("%s doc exceeded threshold: {_id: %s }", ns, idVal));
+    }
 
 	public void run() {
 
@@ -73,8 +95,6 @@ public class TailingOplogAnalyzer {
 	            	continue;
 	            }
 
-			
-
 				OplogEntryKey key = new OplogEntryKey(ns, opType);
 				EntryAccumulator accum = accumulators.get(key);
 				if (accum == null) {
@@ -83,6 +103,30 @@ public class TailingOplogAnalyzer {
 				}
 
 				long len = doc.getByteBuffer().asNIO().array().length;
+	            if (len >= threshold) {
+	                BsonDocument o = (BsonDocument)doc.get("o");
+	                BsonDocument o2 = (BsonDocument)doc.get("o2");
+	                if (o2 != null) {
+	                    BsonValue id = o2.get("_id");
+	                    if (id != null) {
+	                        debug(ns, id);
+	                    } else {
+	                        System.out.println("doc exceeded threshold, but no _id in the 'o2' field");
+	                    }
+	                } else if (o != null) {
+	                    BsonValue id = o.get("_id");
+	                    if (id != null) {
+	                        debug(ns, id);
+	                    } else {
+	                        System.out.println("doc exceeded threshold, but no _id in the 'o' field");
+	                    }
+	                    
+	                } else {
+	                    System.out.println("doc exceeded threshold, but no 'o' or 'o2' field in the olog record");
+	                }
+	                
+	            }
+	            
 				accum.addExecution(len);
 				if (i++ % 5000 == 0) {
 					System.out.print(".");
@@ -134,6 +178,11 @@ public class TailingOplogAnalyzer {
                 .withDescription(  "mongodb connection string uri" )
                 .withLongOpt("uri")
                 .create( "c" ));
+        options.addOption(OptionBuilder.withArgName("log ops size threshold (bytes)")
+                .hasArgs()
+                .withDescription(  "log operations >= this size" )
+                .withLongOpt("threshold")
+                .create( "t" ));
         options.addOption(OptionBuilder.withArgName("limit")
                 .hasArgs()
                 .withDescription(  "only examine limit number of oplog entries" )
@@ -169,6 +218,13 @@ public class TailingOplogAnalyzer {
         
         final TailingOplogAnalyzer analyzer = new TailingOplogAnalyzer(uri);
         
+        String thresholdStr = line.getOptionValue("t");
+        Long threshold = Long.MAX_VALUE;
+        if (thresholdStr != null) {
+            threshold = Long.parseLong(thresholdStr);
+        }
+        analyzer.setThreshold(threshold);
+        
         if (line.hasOption("l")) {
         	String limitStr = line.getOptionValue("l");
         	analyzer.setLimit(Integer.parseInt(limitStr));
@@ -194,6 +250,10 @@ public class TailingOplogAnalyzer {
 
 	public void setLimit(Integer limit) {
 		this.limit = limit;
+	}
+
+	public void setThreshold(Long threshold) {
+		this.threshold = threshold;
 	}
 
 }
