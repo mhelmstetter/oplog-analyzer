@@ -72,6 +72,7 @@ public class OplogAnalyzer {
         mongoClient = new MongoClient(new MongoClientURI(uri));
         this.threshold = threshold;
         this.startTime = startTime;
+        this.endTime = endTime;
     }
 
     public void process() throws InvalidFormatException, IOException {
