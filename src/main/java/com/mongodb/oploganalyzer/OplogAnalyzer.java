@@ -101,16 +101,6 @@ public class OplogAnalyzer {
 
         File currDir = new File(".");
     	String path = currDir.getAbsolutePath();
-    	String fileLocation = path.substring(0, path.length() - 1) + "oplog.xlsx";
-    	
-    	file = new File(fileLocation);
-    	
-    	if (file.exists()) {
-    		FileInputStream fis = new FileInputStream(file);
-    		workbook = new XSSFWorkbook(fis);
-    	} else {
-    		workbook = new XSSFWorkbook();
-    	}
         
         Document query = null;
         if (start != null) {
