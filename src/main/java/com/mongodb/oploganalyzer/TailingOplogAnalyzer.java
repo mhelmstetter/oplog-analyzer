@@ -1,13 +1,17 @@
 package com.mongodb.oploganalyzer;
 
-import static com.mongodb.client.model.Filters.and;
 import static com.mongodb.client.model.Filters.eq;
-import static com.mongodb.client.model.Filters.gte;
-import static com.mongodb.client.model.Filters.ne;
 import static com.mongodb.client.model.Projections.include;
 
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.StringWriter;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -27,7 +31,6 @@ import org.bson.BsonType;
 import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.RawBsonDocument;
-import org.bson.conversions.Bson;
 import org.bson.json.JsonMode;
 import org.bson.json.JsonWriter;
 import org.bson.json.JsonWriterSettings;
@@ -46,11 +49,16 @@ public class TailingOplogAnalyzer {
 	
 	protected static final Logger logger = LoggerFactory.getLogger(OplogAnalyzer.class);
 	
+	private final static SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd_HH.mm");
+	
 	private MongoClient mongoClient;
 	private boolean shutdown = false;
 	private Integer limit;
 	private Long threshold;
 	private Map<OplogEntryKey, EntryAccumulator> accumulators = new HashMap<OplogEntryKey, EntryAccumulator>();
+	
+	private boolean dump;
+	FileChannel channel;
 	
 	
 	public TailingOplogAnalyzer(String uri) {
@@ -70,7 +78,11 @@ public class TailingOplogAnalyzer {
         System.out.println(String.format("%s doc exceeded threshold: {_id: %s }", ns, idVal));
     }
 
-	public void run() {
+	public void run() throws FileNotFoundException {
+		
+		if (dump) {
+			initDumpFile();
+		}
 
 		MongoDatabase local = mongoClient.getDatabase("local");
 		MongoCursor<RawBsonDocument> cursor = null;
@@ -86,7 +98,7 @@ public class TailingOplogAnalyzer {
 			while (cursor.hasNext() && !shutdown) {
 
 				RawBsonDocument doc = cursor.next();
-
+				
 				String ns = ((BsonString) doc.get("ns")).getValue();
 				BsonString op = (BsonString) doc.get("op");
 				String opType = op.getValue();
@@ -94,6 +106,11 @@ public class TailingOplogAnalyzer {
 	            if (ns.startsWith("config.")) {
 	            	continue;
 	            }
+	            
+	            if (channel != null) {
+					ByteBuffer buffer = doc.getByteBuffer().asNIO();
+	                channel.write(buffer);
+				}
 
 				OplogEntryKey key = new OplogEntryKey(ns, opType);
 				EntryAccumulator accum = accumulators.get(key);
@@ -147,11 +164,24 @@ public class TailingOplogAnalyzer {
 				cursor.close();
 			} catch (Exception e) {
 			}
+			if (channel != null) {
+				try {
+					channel.close();
+				} catch (IOException e) {
+				}
+			}
 		}
 
 	}
 	
-    public void report() {
+    private void initDumpFile() throws FileNotFoundException {
+    	File outputFile = new File("oplogDump_" + dateFormat.format(new Date()) + ".bson");
+        FileOutputStream fos = new FileOutputStream(outputFile);
+        channel = fos.getChannel();
+		
+	}
+
+	public void report() {
         //System.out.println(String.format("%-55s %-15s %10s %10s %10s %10s %10s %10s %10s %10s %10s %10s %12s %12s %10s %10s", "Namespace", "operation", "count", "min_ms", "max_ms", "avg_ms", "95%_ms", "total_s", "avgKeysEx", "avgDocsEx", "95%_keysEx", "95%_DocsEx", "totKeysEx(K)", "totDocsEx(K)", "avgReturn", "exRetRatio"));
         System.out.println();
     	System.out.println(String.format("%-80s %5s %10s %10s %10s %10s %20s", "Namespace", "op", "count", "min", "max", "avg", "total"));
@@ -188,6 +218,10 @@ public class TailingOplogAnalyzer {
                 .withDescription(  "only examine limit number of oplog entries" )
                 .withLongOpt("limit")
                 .create( "l" ));
+        options.addOption(OptionBuilder.withArgName("dump")
+                .withDescription(  "dump bson to output file (mongodump format)" )
+                .withLongOpt("dump")
+                .create( "d" ));
 
         CommandLineParser parser = new GnuParser();
         CommandLine line = null;
@@ -240,6 +274,10 @@ public class TailingOplogAnalyzer {
             }));
         }
         
+        if (line.hasOption("d")) {
+        	analyzer.setDump(true);
+        }
+        
         analyzer.run();
     }
 
@@ -254,6 +292,10 @@ public class TailingOplogAnalyzer {
 
 	public void setThreshold(Long threshold) {
 		this.threshold = threshold;
+	}
+
+	public void setDump(boolean dump) {
+		this.dump = dump;
 	}
 
 }
