@@ -1,6 +1,7 @@
 package com.mongodb.oploganalyzer;
 
 import static com.mongodb.client.model.Filters.eq;
+import static com.mongodb.client.model.Filters.gte;
 import static com.mongodb.client.model.Projections.include;
 
 import java.io.File;
@@ -31,6 +32,7 @@ import org.bson.BsonType;
 import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.RawBsonDocument;
+import org.bson.conversions.Bson;
 import org.bson.json.JsonMode;
 import org.bson.json.JsonWriter;
 import org.bson.json.JsonWriterSettings;
@@ -88,12 +90,12 @@ public class TailingOplogAnalyzer {
 		MongoCursor<RawBsonDocument> cursor = null;
 		MongoCollection<RawBsonDocument> oplog = local.getCollection("oplog.rs", RawBsonDocument.class);
 
-		//BsonTimestamp shardTimestamp = getLatestOplogTimestamp();
-		//Bson query = gte("ts", shardTimestamp);
+		BsonTimestamp shardTimestamp = getLatestOplogTimestamp();
+		Bson query = gte("ts", shardTimestamp);
 		
 		int i = 0;
 		try {
-			cursor = oplog.find().sort(new Document("$natural", 1)).noCursorTimeout(true)
+			cursor = oplog.find(query).sort(new Document("$natural", 1)).noCursorTimeout(true)
 					.cursorType(CursorType.TailableAwait).iterator();
 			while (cursor.hasNext() && !shutdown) {
 
