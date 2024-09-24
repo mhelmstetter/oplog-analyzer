@@ -12,6 +12,7 @@ import java.io.StringWriter;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.text.SimpleDateFormat;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
@@ -48,40 +49,39 @@ import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
 
 public class TailingOplogAnalyzer {
-	
+
 	protected static final Logger logger = LoggerFactory.getLogger(OplogAnalyzer.class);
-	
+
 	private final static SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd_HH.mm");
-	
+
 	private MongoClient mongoClient;
 	private boolean shutdown = false;
 	private Integer limit;
 	private Long threshold;
 	private Map<OplogEntryKey, EntryAccumulator> accumulators = new HashMap<OplogEntryKey, EntryAccumulator>();
-	
+
 	private boolean dump;
 	FileChannel channel;
-	
-	
+
 	public TailingOplogAnalyzer(String uri) {
 		mongoClient = new MongoClient(new MongoClientURI(uri));
 	}
-	
+
 	private void debug(String ns, BsonValue id) {
-        String idVal = null;
-        if (id.getBsonType().equals(BsonType.BINARY)) {
-            BsonBinary b = (BsonBinary)id;
-            JsonWriter jsonWriter = new JsonWriter(new StringWriter(), new JsonWriterSettings(JsonMode.SHELL, false));
-            jsonWriter.writeBinaryData(b);
-            idVal = jsonWriter.getWriter().toString();
-        } else {
-            idVal = id.toString();
-        }
-        System.out.println(String.format("%s doc exceeded threshold: {_id: %s }", ns, idVal));
-    }
+		String idVal = null;
+		if (id.getBsonType().equals(BsonType.BINARY)) {
+			BsonBinary b = (BsonBinary) id;
+			JsonWriter jsonWriter = new JsonWriter(new StringWriter(), new JsonWriterSettings(JsonMode.SHELL, false));
+			jsonWriter.writeBinaryData(b);
+			idVal = jsonWriter.getWriter().toString();
+		} else {
+			idVal = id.toString();
+		}
+		System.out.println(String.format("%s doc exceeded threshold: {_id: %s }", ns, idVal));
+	}
 
 	public void run() throws FileNotFoundException {
-		
+
 		if (dump) {
 			initDumpFile();
 		}
@@ -92,7 +92,7 @@ public class TailingOplogAnalyzer {
 
 		BsonTimestamp shardTimestamp = getLatestOplogTimestamp();
 		Bson query = gte("ts", shardTimestamp);
-		
+
 		int i = 0;
 		try {
 			cursor = oplog.find(query).sort(new Document("$natural", 1)).noCursorTimeout(true)
@@ -100,18 +100,18 @@ public class TailingOplogAnalyzer {
 			while (cursor.hasNext() && !shutdown) {
 
 				RawBsonDocument doc = cursor.next();
-				
+
 				String ns = ((BsonString) doc.get("ns")).getValue();
 				BsonString op = (BsonString) doc.get("op");
 				String opType = op.getValue();
-				
-	            if (ns.startsWith("config.")) {
-	            	continue;
-	            }
-	            
-	            if (channel != null) {
+
+				if (ns.startsWith("config.")) {
+					continue;
+				}
+
+				if (channel != null) {
 					ByteBuffer buffer = doc.getByteBuffer().asNIO();
-	                channel.write(buffer);
+					channel.write(buffer);
 				}
 
 				OplogEntryKey key = new OplogEntryKey(ns, opType);
@@ -122,38 +122,38 @@ public class TailingOplogAnalyzer {
 				}
 
 				long len = doc.getByteBuffer().asNIO().array().length;
-	            if (len >= threshold) {
-	                BsonDocument o = (BsonDocument)doc.get("o");
-	                BsonDocument o2 = (BsonDocument)doc.get("o2");
-	                if (o2 != null) {
-	                    BsonValue id = o2.get("_id");
-	                    if (id != null) {
-	                        debug(ns, id);
-	                    } else {
-	                        System.out.println("doc exceeded threshold, but no _id in the 'o2' field");
-	                    }
-	                } else if (o != null) {
-	                    BsonValue id = o.get("_id");
-	                    if (id != null) {
-	                        debug(ns, id);
-	                    } else {
-	                        System.out.println("doc exceeded threshold, but no _id in the 'o' field");
-	                    }
-	                    
-	                } else {
-	                    System.out.println("doc exceeded threshold, but no 'o' or 'o2' field in the olog record");
-	                }
-	                
-	            }
-	            
+				if (len >= threshold) {
+					BsonDocument o = (BsonDocument) doc.get("o");
+					BsonDocument o2 = (BsonDocument) doc.get("o2");
+					if (o2 != null) {
+						BsonValue id = o2.get("_id");
+						if (id != null) {
+							debug(ns, id);
+						} else {
+							System.out.println("doc exceeded threshold, but no _id in the 'o2' field");
+						}
+					} else if (o != null) {
+						BsonValue id = o.get("_id");
+						if (id != null) {
+							debug(ns, id);
+						} else {
+							System.out.println("doc exceeded threshold, but no _id in the 'o' field");
+						}
+
+					} else {
+						System.out.println("doc exceeded threshold, but no 'o' or 'o2' field in the olog record");
+					}
+
+				}
+
 				accum.addExecution(len);
 				if (i++ % 5000 == 0) {
 					System.out.print(".");
 				}
-				
+
 				if (limit != null && i >= limit) {
 					stop();
-                    report();
+					report();
 				}
 			}
 
@@ -175,117 +175,106 @@ public class TailingOplogAnalyzer {
 		}
 
 	}
-	
-    private void initDumpFile() throws FileNotFoundException {
-    	File outputFile = new File("oplogDump_" + dateFormat.format(new Date()) + ".bson");
-        FileOutputStream fos = new FileOutputStream(outputFile);
-        channel = fos.getChannel();
-		
+
+	private void initDumpFile() throws FileNotFoundException {
+		File outputFile = new File("oplogDump_" + dateFormat.format(new Date()) + ".bson");
+		FileOutputStream fos = new FileOutputStream(outputFile);
+		channel = fos.getChannel();
+
 	}
 
 	public void report() {
-        //System.out.println(String.format("%-55s %-15s %10s %10s %10s %10s %10s %10s %10s %10s %10s %10s %12s %12s %10s %10s", "Namespace", "operation", "count", "min_ms", "max_ms", "avg_ms", "95%_ms", "total_s", "avgKeysEx", "avgDocsEx", "95%_keysEx", "95%_DocsEx", "totKeysEx(K)", "totDocsEx(K)", "avgReturn", "exRetRatio"));
-        System.out.println();
-    	System.out.println(String.format("%-80s %5s %10s %10s %10s %10s %20s", "Namespace", "op", "count", "min", "max", "avg", "total"));
-        for (EntryAccumulator acc : accumulators.values()) {
-            System.out.println(acc);
-        }
-        
-    }
-    
-    private BsonTimestamp getLatestOplogTimestamp() {
+		System.out.println();
+		System.out.println(String.format("%-80s %5s %10s %10s %10s %10s %20s", "Namespace", "op", "count", "min", "max",
+				"avg", "total"));
+		accumulators.values().stream().sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed()) // sort
+																												// by
+																												// count
+																												// field
+				.forEach(acc -> System.out.println(acc));
+
+	}
+
+	private BsonTimestamp getLatestOplogTimestamp() {
 		MongoCollection<Document> coll = mongoClient.getDatabase("local").getCollection("oplog.rs");
 		Document doc = null;
 		doc = coll.find().comment("getLatestOplogTimestamp").projection(include("ts")).sort(eq("$natural", -1)).first();
 		BsonTimestamp ts = (BsonTimestamp) doc.get("ts");
 		return ts;
 	}
-	
-    @SuppressWarnings("static-access")
-    private static CommandLine initializeAndParseCommandLineOptions(String[] args) {
-        Options options = new Options();
-        options.addOption(OptionBuilder.withArgName("connection uri")
-                .hasArg()
-                .isRequired()
-                .withDescription(  "mongodb connection string uri" )
-                .withLongOpt("uri")
-                .create( "c" ));
-        options.addOption(OptionBuilder.withArgName("log ops size threshold (bytes)")
-                .hasArgs()
-                .withDescription(  "log operations >= this size" )
-                .withLongOpt("threshold")
-                .create( "t" ));
-        options.addOption(OptionBuilder.withArgName("limit")
-                .hasArgs()
-                .withDescription(  "only examine limit number of oplog entries" )
-                .withLongOpt("limit")
-                .create( "l" ));
-        options.addOption(OptionBuilder.withArgName("dump")
-                .withDescription(  "dump bson to output file (mongodump format)" )
-                .withLongOpt("dump")
-                .create( "d" ));
 
-        CommandLineParser parser = new GnuParser();
-        CommandLine line = null;
-        
-        try {
-            line = parser.parse( options, args );
-            
-        } catch (ParseException e) {
-            System.out.println(e.getMessage());
-            printHelpAndExit(options);
-        } catch (Exception e) {
-            e.printStackTrace();
-            printHelpAndExit(options);
-        }
-        return line;
-    }
-    
-    private static void printHelpAndExit(Options options) {
-        HelpFormatter formatter = new HelpFormatter();
-        formatter.printHelp( "loader", options );
-        System.exit(-1);
-    }
-	
-    public static void main(String[] args) throws java.text.ParseException, IOException, InvalidFormatException {
-        CommandLine line = initializeAndParseCommandLineOptions(args);
-        String uri = line.getOptionValue("c");
-        
-        
-        final TailingOplogAnalyzer analyzer = new TailingOplogAnalyzer(uri);
-        
-        String thresholdStr = line.getOptionValue("t");
-        Long threshold = Long.MAX_VALUE;
-        if (thresholdStr != null) {
-            threshold = Long.parseLong(thresholdStr);
-        }
-        analyzer.setThreshold(threshold);
-        
-        if (line.hasOption("l")) {
-        	String limitStr = line.getOptionValue("l");
-        	analyzer.setLimit(Integer.parseInt(limitStr));
-        	
-        } else {
-        	Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
-                public void run() {
-                	System.out.println();
-                    System.out.println("**** SHUTDOWN *****");
-                    analyzer.stop();
-                    analyzer.report();
-                }
-            }));
-        }
-        
-        if (line.hasOption("d")) {
-        	analyzer.setDump(true);
-        }
-        
-        analyzer.run();
-    }
+	@SuppressWarnings("static-access")
+	private static CommandLine initializeAndParseCommandLineOptions(String[] args) {
+		Options options = new Options();
+		options.addOption(OptionBuilder.withArgName("connection uri").hasArg().isRequired()
+				.withDescription("mongodb connection string uri").withLongOpt("uri").create("c"));
+		options.addOption(OptionBuilder.withArgName("log ops size threshold (bytes)").hasArgs()
+				.withDescription("log operations >= this size").withLongOpt("threshold").create("t"));
+		options.addOption(OptionBuilder.withArgName("limit").hasArgs()
+				.withDescription("only examine limit number of oplog entries").withLongOpt("limit").create("l"));
+		options.addOption(OptionBuilder.withArgName("dump")
+				.withDescription("dump bson to output file (mongodump format)").withLongOpt("dump").create("d"));
+
+		CommandLineParser parser = new GnuParser();
+		CommandLine line = null;
+
+		try {
+			line = parser.parse(options, args);
+
+		} catch (ParseException e) {
+			System.out.println(e.getMessage());
+			printHelpAndExit(options);
+		} catch (Exception e) {
+			e.printStackTrace();
+			printHelpAndExit(options);
+		}
+		return line;
+	}
+
+	private static void printHelpAndExit(Options options) {
+		HelpFormatter formatter = new HelpFormatter();
+		formatter.printHelp("loader", options);
+		System.exit(-1);
+	}
+
+	public static void main(String[] args) throws java.text.ParseException, IOException, InvalidFormatException {
+		CommandLine line = initializeAndParseCommandLineOptions(args);
+		String uri = line.getOptionValue("c");
+
+		final TailingOplogAnalyzer analyzer = new TailingOplogAnalyzer(uri);
+
+		String thresholdStr = line.getOptionValue("t");
+		Long threshold = Long.MAX_VALUE;
+		if (thresholdStr != null) {
+			threshold = Long.parseLong(thresholdStr);
+		}
+		analyzer.setThreshold(threshold);
+
+		if (line.hasOption("l")) {
+			String limitStr = line.getOptionValue("l");
+			analyzer.setLimit(Integer.parseInt(limitStr));
+
+		} else {
+			Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
+				public void run() {
+					System.out.println();
+					System.out.println("**** SHUTDOWN *****");
+					analyzer.stop();
+					analyzer.report();
+				}
+			}));
+		}
+
+		if (line.hasOption("d")) {
+			analyzer.setDump(true);
+		}
+
+		analyzer.run();
+	}
 
 	protected void stop() {
 		shutdown = true;
-		
+
 	}
 
 	public void setLimit(Integer limit) {
