@@ -9,9 +9,6 @@ public class EntryAccumulator {
     private long min = Long.MAX_VALUE;
     private long max = Long.MIN_VALUE;
     
-    
-    
-    
     public EntryAccumulator(OplogEntryKey key) {
         this.key = key;
     }
