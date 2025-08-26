@@ -23,6 +23,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import org.bson.BsonArray;
 import org.bson.BsonBinary;
 import org.bson.BsonDocument;
 import org.bson.BsonString;
@@ -186,8 +187,35 @@ public class TailCommand implements Callable<Integer> {
                         }
 
                         long docSize = doc.getByteBuffer().remaining();
-                        OplogEntryKey key = new OplogEntryKey(ns, opType);
                         
+                        // Handle applyOps operations (transactions/bulk ops)
+                        if ("c".equals(opType) && ns.endsWith(".$cmd")) {
+                            BsonDocument o = (BsonDocument) doc.get("o");
+                            if (o != null && o.containsKey("applyOps")) {
+                                BsonArray applyOps = o.getArray("applyOps");
+                                for (BsonValue applyOp : applyOps) {
+                                    if (applyOp.isDocument()) {
+                                        BsonDocument innerOp = applyOp.asDocument();
+                                        String innerNs = innerOp.getString("ns", new BsonString("unknown")).getValue();
+                                        String innerOpType = innerOp.getString("op", new BsonString("unknown")).getValue();
+                                        
+                                        if (!innerNs.startsWith("config.")) {
+                                            OplogEntryKey innerKey = new OplogEntryKey(innerNs, innerOpType);
+                                            EntryAccumulator innerAccum = targetAccumulators.get(innerKey);
+                                            if (innerAccum == null) {
+                                                innerAccum = new EntryAccumulator(innerKey);
+                                                targetAccumulators.put(innerKey, innerAccum);
+                                            }
+                                            // Use a portion of the total doc size for each nested op
+                                            innerAccum.addExecution(docSize / applyOps.size());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Always track the outer operation too
+                        OplogEntryKey key = new OplogEntryKey(ns, opType);
                         EntryAccumulator accum = targetAccumulators.get(key);
                         if (accum == null) {
                             accum = new EntryAccumulator(key);
@@ -565,8 +593,8 @@ public class TailCommand implements Callable<Integer> {
     
     public void report() {
         System.out.println();
-        System.out.println(String.format("%-80s %5s %10s %10s %10s %10s %20s", "Namespace", "op", "count", "min", "max",
-                "avg", "total"));
+        System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", "Namespace", "op", "count", "min", "max",
+                "avg", "total (size)"));
         accumulators.values().stream().sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
                 .forEach(acc -> System.out.println(acc));
         

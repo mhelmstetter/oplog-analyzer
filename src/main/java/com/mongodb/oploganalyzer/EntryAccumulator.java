@@ -1,5 +1,9 @@
 package com.mongodb.oploganalyzer;
 
+import org.apache.commons.io.FileUtils;
+import java.text.NumberFormat;
+import java.util.Locale;
+
 public class EntryAccumulator {
     
     private OplogEntryKey key;
@@ -25,8 +29,18 @@ public class EntryAccumulator {
     }
     
     public String toString() {
-        return String.format("%-80s %5s %10d %10d %10d %10d %20d", key.ns, key.op, count, min, max, total/count, total);
-        
+        NumberFormat nf = NumberFormat.getInstance(Locale.US);
+        String totalWithSize = String.format("%s (%s)", 
+            nf.format(total), 
+            FileUtils.byteCountToDisplaySize(total));
+        return String.format("%-80s %5s %15s %15s %15s %15s %30s", 
+            key.ns, 
+            key.op, 
+            nf.format(count), 
+            nf.format(min), 
+            nf.format(max), 
+            nf.format(total/count), 
+            totalWithSize);
     }
 
     public long getCount() {

@@ -18,6 +18,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
+import org.bson.BsonArray;
+import org.bson.BsonDocument;
+import org.bson.BsonString;
 import org.bson.BsonTimestamp;
 import org.bson.BsonValue;
 import org.bson.Document;
@@ -261,8 +264,35 @@ public class ScanCommand implements Callable<Integer> {
                 if (docSize >= threshold) {
                     String ns = doc.getString("ns").getValue();
                     BsonValue op = doc.get("op");
-                    OplogEntryKey key = new OplogEntryKey(ns, op.asString().getValue());
+                    String opType = op.asString().getValue();
                     
+                    // Handle applyOps operations (transactions/bulk ops)
+                    if ("c".equals(opType) && ns.endsWith(".$cmd")) {
+                        BsonDocument o = (BsonDocument) doc.get("o");
+                        if (o != null && o.containsKey("applyOps")) {
+                            BsonArray applyOps = o.getArray("applyOps");
+                            for (BsonValue applyOp : applyOps) {
+                                if (applyOp.isDocument()) {
+                                    BsonDocument innerOp = applyOp.asDocument();
+                                    String innerNs = innerOp.getString("ns", new BsonString("unknown")).getValue();
+                                    String innerOpType = innerOp.getString("op", new BsonString("unknown")).getValue();
+                                    
+                                    if (!innerNs.startsWith("config.")) {
+                                        OplogEntryKey innerKey = new OplogEntryKey(innerNs, innerOpType);
+                                        EntryAccumulator innerAcc = targetAccumulators.get(innerKey);
+                                        if (innerAcc == null) {
+                                            innerAcc = new EntryAccumulator(innerKey);
+                                            targetAccumulators.put(innerKey, innerAcc);
+                                        }
+                                        innerAcc.addExecution(docSize / applyOps.size());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Always track the outer operation too
+                    OplogEntryKey key = new OplogEntryKey(ns, opType);
                     EntryAccumulator acc = targetAccumulators.get(key);
                     if (acc == null) {
                         acc = new EntryAccumulator(key);
@@ -306,18 +336,14 @@ public class ScanCommand implements Callable<Integer> {
     public void report() {
         System.out.println();
         System.out.println("========== OPLOG ANALYSIS REPORT ==========");
-        System.out.println(String.format("%-60s %10s %10s %15s", "Namespace::Operation", "Count", "Total Size", "Avg Size"));
-        System.out.println(String.format("%-60s %10s %10s %15s", 
-            "=".repeat(60), "=".repeat(10), "=".repeat(10), "=".repeat(15)));
+        System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", "Namespace", "op", "count", "min", "max",
+                "avg", "total (size)"));
+        System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", 
+            "=".repeat(80), "=".repeat(5), "=".repeat(15), "=".repeat(15), "=".repeat(15), "=".repeat(15), "=".repeat(30)));
         
-        accumulators.entrySet().stream()
-            .sorted((e1, e2) -> Long.compare(e2.getValue().getTotal(), e1.getValue().getTotal()))
-            .forEach(entry -> {
-                OplogEntryKey key = entry.getKey();
-                EntryAccumulator acc = entry.getValue();
-                System.out.println(String.format("%-60s %10d %10d %15.2f", 
-                    key.toString(), acc.getCount(), acc.getTotal(), (double)acc.getAvg()));
-            });
+        accumulators.values().stream()
+            .sorted((e1, e2) -> Long.compare(e2.getTotal(), e1.getTotal()))
+            .forEach(acc -> System.out.println(acc));
     }
     
     protected void stop() {
