@@ -49,6 +49,7 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.shardsync.ShardClient;
+import com.mongodb.util.bson.BsonValueConverter;
 
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -769,15 +770,33 @@ public class TailCommand implements Callable<Integer> {
     }
     
     private String getIdString(BsonValue id) {
-        if (id.getBsonType().equals(BsonType.BINARY)) {
-            BsonBinary b = (BsonBinary) id;
-            try (JsonWriter jsonWriter = new JsonWriter(new StringWriter(), JsonWriterSettings.builder().outputMode(JsonMode.SHELL).indent(false).build())) {
-				jsonWriter.writeBinaryData(b);
-				return jsonWriter.getWriter().toString();
-			}
-        } else {
-            return id.toString();
+        if (id == null) {
+            return "null";
         }
+        
+        // Use BsonValueConverter to get clean representation
+        Object converted = BsonValueConverter.convertBsonValueToObject(id);
+        if (converted != null) {
+            return converted.toString();
+        } else {
+            return "null";
+        }
+    }
+    
+    private String formatIdKey(String idKey) {
+        // Split the namespace::id format
+        String[] parts = idKey.split("::", 2);
+        if (parts.length != 2) {
+            return idKey; // Return as-is if format is unexpected
+        }
+        
+        String ns = parts[0];
+        String id = parts[1];
+        
+        // No need for special BsonObjectId handling since getIdString() now uses BsonValueConverter
+        // which returns clean string representations
+        
+        return ns + "::" + id;
     }
     
     private void initDumpFile() throws IOException {
@@ -824,48 +843,38 @@ public class TailCommand implements Callable<Integer> {
         System.out.println();
         System.out.println("Top " + topIdCount + " most frequent _id values:");
         
-        if (fetchDocSizes) {
-            // Show both document and oplog sizes when fetchDocSizes is enabled
-            System.out.println(String.format("%-50s %8s %15s %15s %15s", 
-                "Namespace::_id", "Count", "Avg Doc Size", "Avg Oplog Size", "Doc/Oplog Ratio"));
-            System.out.println("=".repeat(120));
-        } else {
-            // Show only oplog-based information when fetchDocSizes is disabled
-            System.out.println(String.format("%-50s %8s %15s", 
-                "Namespace::_id", "Count", "Avg Oplog Size"));
-            System.out.println("=".repeat(85));
-        }
-            
         Map<String, IdStatistics> statsMap = idStatsCache.asMap();
         List<Map.Entry<String, IdStatistics>> sortedEntries = statsMap.entrySet().stream()
             .sorted((e1, e2) -> Long.compare(e2.getValue().count, e1.getValue().count))
             .limit(topIdCount)
             .collect(Collectors.toList());
+        
+        // Calculate dynamic column widths based on actual content
+        int maxIdKeyLength = "Namespace::_id".length();
+        for (Map.Entry<String, IdStatistics> entry : sortedEntries) {
+            String formattedIdKey = formatIdKey(entry.getKey());
+            maxIdKeyLength = Math.max(maxIdKeyLength, formattedIdKey.length());
+        }
+        
+        // Set reasonable bounds for the ID column width
+        maxIdKeyLength = Math.max(30, Math.min(maxIdKeyLength + 2, 80));
+        
+        if (fetchDocSizes) {
+            // Show both document and oplog sizes when fetchDocSizes is enabled
+            String headerFormat = "%-" + maxIdKeyLength + "s %8s %15s %15s %15s";
+            System.out.println(String.format(headerFormat, 
+                "Namespace::_id", "Count", "Avg Doc Size", "Avg Oplog Size", "Doc/Oplog Ratio"));
+            System.out.println("=".repeat(maxIdKeyLength + 8 + 15 + 15 + 15 + 4));
+        } else {
+            // Show only oplog-based information when fetchDocSizes is disabled
+            String headerFormat = "%-" + maxIdKeyLength + "s %8s %15s";
+            System.out.println(String.format(headerFormat, 
+                "Namespace::_id", "Count", "Avg Oplog Size"));
+            System.out.println("=".repeat(maxIdKeyLength + 8 + 15 + 2));
+        }
             
         for (Map.Entry<String, IdStatistics> entry : sortedEntries) {
-            String idKey = entry.getKey();
-            
-            // Format the namespace::id for better readability
-            String[] parts = idKey.split("::");
-            if (parts.length == 2) {
-                String ns = parts[0];
-                String id = parts[1];
-                // Shorten long BsonObjectId representations
-                if (id.startsWith("BsonObjectId{value=") && id.endsWith("}")) {
-                    id = id.substring(19, id.length() - 1); // Extract just the ID value
-                }
-                // Truncate namespace if too long
-                if (ns.length() > 25) {
-                    ns = ns.substring(0, 22) + "...";
-                }
-                idKey = ns + "::" + id;
-            }
-            
-            // Final truncation if still too long
-            if (idKey.length() > 50) {
-                idKey = idKey.substring(0, 47) + "...";
-            }
-            
+            String formattedIdKey = formatIdKey(entry.getKey());
             IdStatistics stats = entry.getValue();
             String avgOplogSizeStr = org.apache.commons.io.FileUtils.byteCountToDisplaySize((long)stats.getAverageOplogSize());
             
@@ -885,12 +894,14 @@ public class TailCommand implements Callable<Integer> {
                     }
                 }
                 
-                System.out.println(String.format("%-50s %8d %15s %15s %15s", 
-                    idKey, stats.count, avgDocSizeStr, avgOplogSizeStr, ratioStr));
+                String rowFormat = "%-" + maxIdKeyLength + "s %8d %15s %15s %15s";
+                System.out.println(String.format(rowFormat, 
+                    formattedIdKey, stats.count, avgDocSizeStr, avgOplogSizeStr, ratioStr));
             } else {
                 // Show simplified information when only oplog sizes are available
-                System.out.println(String.format("%-50s %8d %15s", 
-                    idKey, stats.count, avgOplogSizeStr));
+                String rowFormat = "%-" + maxIdKeyLength + "s %8d %15s";
+                System.out.println(String.format(rowFormat, 
+                    formattedIdKey, stats.count, avgOplogSizeStr));
             }
         }
         
