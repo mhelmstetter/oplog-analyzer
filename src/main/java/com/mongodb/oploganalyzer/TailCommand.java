@@ -72,8 +72,11 @@ public class TailCommand implements Callable<Integer> {
     @Option(names = {"-d", "--dump"}, description = "Dump BSON to output file (mongodump format)")
     private boolean dump = false;
     
-    @Option(names = {"--idStats"}, description = "Enable _id statistics tracking")
+    @Option(names = {"--idStats"}, description = "Enable _id statistics tracking (use --idStatsThreshold to control which documents are tracked)")
     private boolean idStats = false;
+    
+    @Option(names = {"--idStatsThreshold"}, description = "Minimum size (bytes) for documents to be included in ID statistics (default: 0 = track all documents). Only effective with --idStats")
+    private Long idStatsThreshold = 0L;
     
     @Option(names = {"--fetchDocSizes"}, description = "Fetch actual document sizes for updates (slower but more accurate). Only effective with --idStats")
     private boolean fetchDocSizes = false;
@@ -277,15 +280,16 @@ public class TailCommand implements Callable<Integer> {
             }
             accum.addExecution(actualSize);
             
-            // Check threshold and report
+            // Check main threshold for debug reporting
             if (actualSize >= threshold) {
                 debug(shardId, update.ns, update.id, actualSize);
-                
-                if (idStats) {
-                    String idKey = update.ns + "::" + getIdString(update.id);
-                    IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
-                    stats.addSizes(actualSize, update.oplogEntrySize);
-                }
+            }
+            
+            // Check ID statistics threshold separately
+            if (idStats && actualSize >= idStatsThreshold) {
+                String idKey = update.ns + "::" + getIdString(update.id);
+                IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
+                stats.addSizes(actualSize, update.oplogEntrySize);
             }
             
             // Handle dump if needed
@@ -304,16 +308,17 @@ public class TailCommand implements Callable<Integer> {
             }
             accum.addExecution(oplogSize);
             
-            // Check threshold using oplog size (not ideal but fast)
+            // Check main threshold for debug reporting (using oplog size - not ideal but fast)
             if (oplogSize >= threshold) {
                 debug(shardId, ns, id, oplogSize);
-                
-                if (idStats) {
-                    String idKey = ns + "::" + getIdString(id);
-                    IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
-                    // Only oplog size known, document size unknown (-1)
-                    stats.addSizes(-1, oplogSize);
-                }
+            }
+            
+            // Check ID statistics threshold separately (using oplog size)
+            if (idStats && oplogSize >= idStatsThreshold) {
+                String idKey = ns + "::" + getIdString(id);
+                IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
+                // Only oplog size known, document size unknown (-1)
+                stats.addSizes(-1, oplogSize);
             }
             
             // Handle dump if needed
@@ -419,35 +424,37 @@ public class TailCommand implements Callable<Integer> {
                             }
                             accum.addExecution(docSize);
                             
-                            // For inserts, the oplog has the full document; for deletes, only the _id
+                            // Get the _id for both debug and statistics purposes
+                            BsonDocument o = (BsonDocument) doc.get("o");
+                            BsonValue id = null;
+                            if (o != null) {
+                                id = o.get("_id");
+                            }
+                            
+                            // Check main threshold for debug reporting
                             if (docSize >= threshold) {
-                                BsonDocument o = (BsonDocument) doc.get("o");
-                                if (o != null) {
-                                    BsonValue id = o.get("_id");
-                                    if (id != null) {
-                                        debug(shardId, ns, id, docSize);
-                                        
-                                        if (idStats) {
-                                            String idKey = ns + "::" + getIdString(id);
-                                            IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
-                                            // For inserts, oplog contains full doc; for deletes, just _id
-                                            // We can't get the actual doc size for deletes (doc is gone)
-                                            if ("i".equals(opType)) {
-                                                // Insert: oplog size = document size
-                                                stats.addSizes(docSize, docSize);
-                                            } else if ("d".equals(opType)) {
-                                                // Delete: we don't know actual doc size, use -1 as marker
-                                                stats.addSizes(-1, docSize);
-                                            } else {
-                                                // Other ops: use oplog size for both (shouldn't happen here)
-                                                stats.addSizes(docSize, docSize);
-                                            }
-                                        }
-                                    } else {
-                                        System.out.println("doc exceeded threshold, but no _id in the 'o' field");
-                                    }
+                                if (id != null) {
+                                    debug(shardId, ns, id, docSize);
                                 } else {
-                                    System.out.println("doc exceeded threshold, but no 'o' field in the oplog record");
+                                    System.out.println("doc exceeded threshold, but no _id in the 'o' field");
+                                }
+                            }
+                            
+                            // Check ID statistics threshold separately
+                            if (idStats && docSize >= idStatsThreshold && id != null) {
+                                String idKey = ns + "::" + getIdString(id);
+                                IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
+                                // For inserts, oplog contains full doc; for deletes, just _id
+                                // We can't get the actual doc size for deletes (doc is gone)
+                                if ("i".equals(opType)) {
+                                    // Insert: oplog size = document size
+                                    stats.addSizes(docSize, docSize);
+                                } else if ("d".equals(opType)) {
+                                    // Delete: we don't know actual doc size, use -1 as marker
+                                    stats.addSizes(-1, docSize);
+                                } else {
+                                    // Other ops: use oplog size for both (shouldn't happen here)
+                                    stats.addSizes(docSize, docSize);
                                 }
                             }
                             
@@ -891,6 +898,7 @@ public class TailCommand implements Callable<Integer> {
         System.out.println("Notes:");
         System.out.println("- Count: Total operations on this _id (inserts + updates + deletes)");
         System.out.println("- Avg Oplog Size: Average oplog entry size (small for updates/deletes, full for inserts)");
+        System.out.println("- ID Statistics Threshold: " + idStatsThreshold + " bytes (only documents >= this size are tracked)");
         
         if (fetchDocSizes) {
             System.out.println("- Avg Doc Size: Average actual document size (excludes deletes where size is unknown)");
