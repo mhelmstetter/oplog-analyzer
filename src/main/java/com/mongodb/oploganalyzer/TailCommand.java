@@ -228,14 +228,14 @@ public class TailCommand implements Callable<Integer> {
                             if (o2 != null) {
                                 BsonValue id = o2.get("_id");
                                 if (id != null) {
-                                    debug(shardId, ns, id);
+                                    debug(shardId, ns, id, docSize);
                                 } else {
                                     System.out.println("doc exceeded threshold, but no _id in the 'o2' field");
                                 }
                             } else if (o != null) {
                                 BsonValue id = o.get("_id");
                                 if (id != null) {
-                                    debug(shardId, ns, id);
+                                    debug(shardId, ns, id, docSize);
                                 } else {
                                     System.out.println("doc exceeded threshold, but no _id in the 'o' field");
                                 }
@@ -244,7 +244,14 @@ public class TailCommand implements Callable<Integer> {
                             }
 
                             if (idStats) {
-                                BsonValue id = doc.get("o", new BsonDocument()).asDocument().get("_id");
+                                BsonValue id = null;
+                                // For updates, _id is in o2; for inserts/deletes, it's in o
+                                if (o2 != null) {
+                                    id = o2.get("_id");
+                                } else if (o != null) {
+                                    id = o.get("_id");
+                                }
+                                
                                 if (id != null) {
                                     String idKey = ns + "::" + getIdString(id);
                                     IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
@@ -544,10 +551,12 @@ public class TailCommand implements Callable<Integer> {
         logger.info("Total processed across all shards: {} entries", String.format("%,d", totalCount));
     }
     
-    private void debug(String shardId, String ns, BsonValue id) {
+    private void debug(String shardId, String ns, BsonValue id, long docSize) {
         if (id != null) {
             String idVal = getIdString(id);
-            System.out.println(String.format("[%s] %s doc exceeded threshold: {_id: %s }", shardId, ns, idVal));
+            String sizeDisplay = org.apache.commons.io.FileUtils.byteCountToDisplaySize(docSize);
+            System.out.println(String.format("[%s] %s doc exceeded threshold (%s): {_id: %s }", 
+                shardId, ns, sizeDisplay, idVal));
         }
     }
     
