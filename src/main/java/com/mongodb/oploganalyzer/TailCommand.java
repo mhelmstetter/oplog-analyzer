@@ -2,6 +2,7 @@ package com.mongodb.oploganalyzer;
 
 import static com.mongodb.client.model.Filters.eq;
 import static com.mongodb.client.model.Filters.gte;
+import static com.mongodb.client.model.Filters.in;
 import static com.mongodb.client.model.Projections.include;
 
 import java.io.FileNotFoundException;
@@ -11,6 +12,7 @@ import java.io.StringWriter;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -73,6 +75,9 @@ public class TailCommand implements Callable<Integer> {
     @Option(names = {"--idStats"}, description = "Enable _id statistics tracking")
     private boolean idStats = false;
     
+    @Option(names = {"--fetchDocSizes"}, description = "Fetch actual document sizes for updates (slower but more accurate). Only effective with --idStats")
+    private boolean fetchDocSizes = false;
+    
     @Option(names = {"--topIdCount"}, description = "Number of top frequent _id values to report (default 20)", defaultValue = "20")
     private int topIdCount = 20;
     
@@ -94,19 +99,52 @@ public class TailCommand implements Callable<Integer> {
     
     static class IdStatistics {
         long count = 0;
-        long minSize = Long.MAX_VALUE;
-        long maxSize = Long.MIN_VALUE;
-        long totalSize = 0;
+        // Document sizes
+        long docSizeCount = 0; // Track how many valid doc sizes we have
+        long minDocSize = Long.MAX_VALUE;
+        long maxDocSize = Long.MIN_VALUE;
+        long totalDocSize = 0;
+        // Oplog entry sizes
+        long minOplogSize = Long.MAX_VALUE;
+        long maxOplogSize = Long.MIN_VALUE;
+        long totalOplogSize = 0;
         
-        void addSize(long size) {
+        void addSizes(long docSize, long oplogSize) {
             count++;
-            totalSize += size;
-            if (size < minSize) minSize = size;
-            if (size > maxSize) maxSize = size;
+            // Track document sizes (skip if unknown, marked as -1)
+            if (docSize >= 0) {
+                docSizeCount++;
+                totalDocSize += docSize;
+                if (docSize < minDocSize) minDocSize = docSize;
+                if (docSize > maxDocSize) maxDocSize = docSize;
+            }
+            // Track oplog sizes
+            totalOplogSize += oplogSize;
+            if (oplogSize < minOplogSize) minOplogSize = oplogSize;
+            if (oplogSize > maxOplogSize) maxOplogSize = oplogSize;
         }
         
-        double getAverageSize() {
-            return count > 0 ? (double) totalSize / count : 0;
+        double getAverageDocSize() {
+            return docSizeCount > 0 ? (double) totalDocSize / docSizeCount : 0;
+        }
+        
+        double getAverageOplogSize() {
+            return count > 0 ? (double) totalOplogSize / count : 0;
+        }
+    }
+    
+    // Helper class to track pending updates that need size fetching
+    static class PendingUpdate {
+        final String ns;
+        final BsonValue id;
+        final long oplogEntrySize;
+        final RawBsonDocument doc;
+        
+        PendingUpdate(String ns, BsonValue id, long oplogEntrySize, RawBsonDocument doc) {
+            this.ns = ns;
+            this.id = id;
+            this.oplogEntrySize = oplogEntrySize;
+            this.doc = doc;
         }
     }
     
@@ -117,6 +155,12 @@ public class TailCommand implements Callable<Integer> {
         
         private final AtomicBoolean running = new AtomicBoolean();
         private final AtomicBoolean complete = new AtomicBoolean();
+        
+        // Batch fetching for update operations
+        private final List<PendingUpdate> pendingUpdates = new ArrayList<>();
+        private long lastBatchTime = System.currentTimeMillis();
+        private static final int MAX_BATCH_SIZE = 10;
+        private static final long BATCH_TIMEOUT_MS = 100; // 100ms timeout
         
         public ShardTailWorker(String shardId, MongoClient mongoClient, Map<OplogEntryKey, EntryAccumulator> targetAccumulators) {
             this.shardId = shardId;
@@ -146,7 +190,135 @@ public class TailCommand implements Callable<Integer> {
             } catch (Exception e) {
                 logger.error("Error tailing shard {}: {}", shardId, e.getMessage(), e);
             } finally {
+                // Process any remaining pending updates (only if fetchDocSizes is enabled)
+                if (fetchDocSizes && !pendingUpdates.isEmpty()) {
+                    processPendingUpdates();
+                }
                 complete.set(true);
+            }
+        }
+        
+        private void processPendingUpdates() {
+            if (pendingUpdates.isEmpty()) {
+                return;
+            }
+            
+            // Group pending updates by namespace
+            Map<String, List<PendingUpdate>> updatesByNs = new HashMap<>();
+            for (PendingUpdate update : pendingUpdates) {
+                updatesByNs.computeIfAbsent(update.ns, k -> new ArrayList<>()).add(update);
+            }
+            
+            // Process each namespace
+            for (Map.Entry<String, List<PendingUpdate>> entry : updatesByNs.entrySet()) {
+                String ns = entry.getKey();
+                List<PendingUpdate> updates = entry.getValue();
+                
+                // Parse namespace to get database and collection
+                String[] parts = ns.split("\\.", 2);
+                if (parts.length != 2) {
+                    continue;
+                }
+                String dbName = parts[0];
+                String collName = parts[1];
+                
+                // Get the collection
+                MongoDatabase db = mongoClient.getDatabase(dbName);
+                MongoCollection<RawBsonDocument> collection = db.getCollection(collName, RawBsonDocument.class);
+                
+                // Prepare list of IDs for batch query
+                List<BsonValue> ids = new ArrayList<>();
+                for (PendingUpdate update : updates) {
+                    ids.add(update.id);
+                }
+                
+                try {
+                    // Fetch actual documents
+                    Map<BsonValue, Long> actualSizes = new HashMap<>();
+                    collection.find(in("_id", ids))
+                        .forEach(doc -> {
+                            BsonValue docId = doc.get("_id");
+                            if (docId != null) {
+                                long actualSize = doc.getByteBuffer().remaining();
+                                actualSizes.put(docId, actualSize);
+                            }
+                        });
+                    
+                    // Process each update with actual size
+                    for (PendingUpdate update : updates) {
+                        Long actualSize = actualSizes.get(update.id);
+                        long sizeToUse = (actualSize != null) ? actualSize : update.oplogEntrySize;
+                        
+                        // Process the update with actual size
+                        processUpdateWithSize(update, sizeToUse);
+                    }
+                } catch (Exception e) {
+                    logger.warn("[{}] Failed to fetch actual document sizes for {}: {}", 
+                        shardId, ns, e.getMessage());
+                    // Fall back to oplog entry size
+                    for (PendingUpdate update : updates) {
+                        processUpdateWithSize(update, update.oplogEntrySize);
+                    }
+                }
+            }
+            
+            pendingUpdates.clear();
+        }
+        
+        private void processUpdateWithSize(PendingUpdate update, long actualSize) {
+            String opType = "u"; // updates
+            
+            // Track in accumulator
+            OplogEntryKey key = new OplogEntryKey(update.ns, opType);
+            EntryAccumulator accum = targetAccumulators.get(key);
+            if (accum == null) {
+                accum = new EntryAccumulator(key);
+                targetAccumulators.put(key, accum);
+            }
+            accum.addExecution(actualSize);
+            
+            // Check threshold and report
+            if (actualSize >= threshold) {
+                debug(shardId, update.ns, update.id, actualSize);
+                
+                if (idStats) {
+                    String idKey = update.ns + "::" + getIdString(update.id);
+                    IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
+                    stats.addSizes(actualSize, update.oplogEntrySize);
+                }
+            }
+            
+            // Handle dump if needed
+            if (dump) {
+                writeDump(update.doc);
+            }
+        }
+        
+        private void processUpdateOplogOnly(String ns, String opType, BsonValue id, long oplogSize, RawBsonDocument doc) {
+            // Track in accumulator using oplog size
+            OplogEntryKey key = new OplogEntryKey(ns, opType);
+            EntryAccumulator accum = targetAccumulators.get(key);
+            if (accum == null) {
+                accum = new EntryAccumulator(key);
+                targetAccumulators.put(key, accum);
+            }
+            accum.addExecution(oplogSize);
+            
+            // Check threshold using oplog size (not ideal but fast)
+            if (oplogSize >= threshold) {
+                debug(shardId, ns, id, oplogSize);
+                
+                if (idStats) {
+                    String idKey = ns + "::" + getIdString(id);
+                    IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
+                    // Only oplog size known, document size unknown (-1)
+                    stats.addSizes(-1, oplogSize);
+                }
+            }
+            
+            // Handle dump if needed
+            if (dump) {
+                writeDump(doc);
             }
         }
         
@@ -214,56 +386,74 @@ public class TailCommand implements Callable<Integer> {
                             }
                         }
                         
-                        // Always track the outer operation too
-                        OplogEntryKey key = new OplogEntryKey(ns, opType);
-                        EntryAccumulator accum = targetAccumulators.get(key);
-                        if (accum == null) {
-                            accum = new EntryAccumulator(key);
-                            targetAccumulators.put(key, accum);
-                        }
-
-                        if (docSize >= threshold) {
-                            BsonDocument o = (BsonDocument) doc.get("o");
+                        // Handle update operations
+                        if ("u".equals(opType)) {
                             BsonDocument o2 = (BsonDocument) doc.get("o2");
                             if (o2 != null) {
                                 BsonValue id = o2.get("_id");
                                 if (id != null) {
-                                    debug(shardId, ns, id, docSize);
-                                } else {
-                                    System.out.println("doc exceeded threshold, but no _id in the 'o2' field");
-                                }
-                            } else if (o != null) {
-                                BsonValue id = o.get("_id");
-                                if (id != null) {
-                                    debug(shardId, ns, id, docSize);
-                                } else {
-                                    System.out.println("doc exceeded threshold, but no _id in the 'o' field");
-                                }
-                            } else {
-                                System.out.println("doc exceeded threshold, but no 'o' or 'o2' field in the olog record");
-                            }
-
-                            if (idStats) {
-                                BsonValue id = null;
-                                // For updates, _id is in o2; for inserts/deletes, it's in o
-                                if (o2 != null) {
-                                    id = o2.get("_id");
-                                } else if (o != null) {
-                                    id = o.get("_id");
-                                }
-                                
-                                if (id != null) {
-                                    String idKey = ns + "::" + getIdString(id);
-                                    IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
-                                    stats.addSize(docSize);
+                                    if (fetchDocSizes && idStats) {
+                                        // Add to pending updates for batch processing (fetch actual doc sizes)
+                                        pendingUpdates.add(new PendingUpdate(ns, id, docSize, doc));
+                                        
+                                        // Check if batch should be processed
+                                        long currentTime = System.currentTimeMillis();
+                                        if (pendingUpdates.size() >= MAX_BATCH_SIZE || 
+                                            (currentTime - lastBatchTime) >= BATCH_TIMEOUT_MS) {
+                                            processPendingUpdates();
+                                            lastBatchTime = currentTime;
+                                        }
+                                    } else {
+                                        // Process immediately using oplog entry size only
+                                        processUpdateOplogOnly(ns, opType, id, docSize, doc);
+                                    }
                                 }
                             }
-                        }
-
-                        accum.addExecution(docSize);
-                        
-                        if (dump) {
-                            writeDump(doc);
+                        } else {
+                            // For non-update operations (inserts, deletes), process immediately
+                            OplogEntryKey key = new OplogEntryKey(ns, opType);
+                            EntryAccumulator accum = targetAccumulators.get(key);
+                            if (accum == null) {
+                                accum = new EntryAccumulator(key);
+                                targetAccumulators.put(key, accum);
+                            }
+                            accum.addExecution(docSize);
+                            
+                            // For inserts, the oplog has the full document; for deletes, only the _id
+                            if (docSize >= threshold) {
+                                BsonDocument o = (BsonDocument) doc.get("o");
+                                if (o != null) {
+                                    BsonValue id = o.get("_id");
+                                    if (id != null) {
+                                        debug(shardId, ns, id, docSize);
+                                        
+                                        if (idStats) {
+                                            String idKey = ns + "::" + getIdString(id);
+                                            IdStatistics stats = idStatsCache.get(idKey, k -> new IdStatistics());
+                                            // For inserts, oplog contains full doc; for deletes, just _id
+                                            // We can't get the actual doc size for deletes (doc is gone)
+                                            if ("i".equals(opType)) {
+                                                // Insert: oplog size = document size
+                                                stats.addSizes(docSize, docSize);
+                                            } else if ("d".equals(opType)) {
+                                                // Delete: we don't know actual doc size, use -1 as marker
+                                                stats.addSizes(-1, docSize);
+                                            } else {
+                                                // Other ops: use oplog size for both (shouldn't happen here)
+                                                stats.addSizes(docSize, docSize);
+                                            }
+                                        }
+                                    } else {
+                                        System.out.println("doc exceeded threshold, but no _id in the 'o' field");
+                                    }
+                                } else {
+                                    System.out.println("doc exceeded threshold, but no 'o' field in the oplog record");
+                                }
+                            }
+                            
+                            if (dump) {
+                                writeDump(doc);
+                            }
                         }
                         
                         count++;
@@ -271,6 +461,12 @@ public class TailCommand implements Callable<Integer> {
                         // Report every 30 seconds
                         long currentTime = System.currentTimeMillis();
                         if (currentTime - lastReportTime >= 30000) {
+                            // Process any pending updates before reporting (only if fetchDocSizes is enabled)
+                            if (fetchDocSizes && !pendingUpdates.isEmpty()) {
+                                processPendingUpdates();
+                                lastBatchTime = currentTime;
+                            }
+                            
                             long lagSeconds = calculateLagSeconds(lastOplogTimestamp);
                             logger.info("[{}] Processed {} entries, Lag: {}s", 
                                 shardId, String.format("%,d", count), lagSeconds);
@@ -285,6 +481,11 @@ public class TailCommand implements Callable<Integer> {
                         logger.debug("[{}] Interrupted: {}", shardId, e.getMessage());
                         break;
                     }
+                }
+                
+                // Process any remaining pending updates (only if fetchDocSizes is enabled)
+                if (fetchDocSizes && !pendingUpdates.isEmpty()) {
+                    processPendingUpdates();
                 }
                 
                 // Final report with lag
@@ -615,9 +816,18 @@ public class TailCommand implements Callable<Integer> {
     private void printIdStatistics() {
         System.out.println();
         System.out.println("Top " + topIdCount + " most frequent _id values:");
-        System.out.println(String.format("%-80s %10s %10s %10s %15s", "Namespace::_id", "count", "min", "max", "avg"));
-        System.out.println(String.format("%-80s %10s %10s %10s %15s", 
-            "=".repeat(80), "=".repeat(10), "=".repeat(10), "=".repeat(10), "=".repeat(15)));
+        
+        if (fetchDocSizes) {
+            // Show both document and oplog sizes when fetchDocSizes is enabled
+            System.out.println(String.format("%-50s %8s %15s %15s %15s", 
+                "Namespace::_id", "Count", "Avg Doc Size", "Avg Oplog Size", "Doc/Oplog Ratio"));
+            System.out.println("=".repeat(120));
+        } else {
+            // Show only oplog-based information when fetchDocSizes is disabled
+            System.out.println(String.format("%-50s %8s %15s", 
+                "Namespace::_id", "Count", "Avg Oplog Size"));
+            System.out.println("=".repeat(85));
+        }
             
         Map<String, IdStatistics> statsMap = idStatsCache.asMap();
         List<Map.Entry<String, IdStatistics>> sortedEntries = statsMap.entrySet().stream()
@@ -627,9 +837,66 @@ public class TailCommand implements Callable<Integer> {
             
         for (Map.Entry<String, IdStatistics> entry : sortedEntries) {
             String idKey = entry.getKey();
+            
+            // Format the namespace::id for better readability
+            String[] parts = idKey.split("::");
+            if (parts.length == 2) {
+                String ns = parts[0];
+                String id = parts[1];
+                // Shorten long BsonObjectId representations
+                if (id.startsWith("BsonObjectId{value=") && id.endsWith("}")) {
+                    id = id.substring(19, id.length() - 1); // Extract just the ID value
+                }
+                // Truncate namespace if too long
+                if (ns.length() > 25) {
+                    ns = ns.substring(0, 22) + "...";
+                }
+                idKey = ns + "::" + id;
+            }
+            
+            // Final truncation if still too long
+            if (idKey.length() > 50) {
+                idKey = idKey.substring(0, 47) + "...";
+            }
+            
             IdStatistics stats = entry.getValue();
-            System.out.println(String.format("%-80s %10d %10d %10d %15.2f", 
-                idKey, stats.count, stats.minSize, stats.maxSize, stats.getAverageSize()));
+            String avgOplogSizeStr = org.apache.commons.io.FileUtils.byteCountToDisplaySize((long)stats.getAverageOplogSize());
+            
+            if (fetchDocSizes) {
+                // Show full information when document sizes were fetched
+                String avgDocSizeStr = stats.docSizeCount > 0 ? 
+                    org.apache.commons.io.FileUtils.byteCountToDisplaySize((long)stats.getAverageDocSize()) : "N/A";
+                
+                // Calculate ratio of doc size to oplog size (useful for understanding update efficiency)
+                String ratioStr = "N/A";
+                if (stats.docSizeCount > 0 && stats.getAverageOplogSize() > 0) {
+                    double ratio = stats.getAverageDocSize() / stats.getAverageOplogSize();
+                    if (ratio < 10) {
+                        ratioStr = String.format("%.1fx", ratio);
+                    } else {
+                        ratioStr = String.format("%.0fx", ratio);
+                    }
+                }
+                
+                System.out.println(String.format("%-50s %8d %15s %15s %15s", 
+                    idKey, stats.count, avgDocSizeStr, avgOplogSizeStr, ratioStr));
+            } else {
+                // Show simplified information when only oplog sizes are available
+                System.out.println(String.format("%-50s %8d %15s", 
+                    idKey, stats.count, avgOplogSizeStr));
+            }
+        }
+        
+        System.out.println();
+        System.out.println("Notes:");
+        System.out.println("- Count: Total operations on this _id (inserts + updates + deletes)");
+        System.out.println("- Avg Oplog Size: Average oplog entry size (small for updates/deletes, full for inserts)");
+        
+        if (fetchDocSizes) {
+            System.out.println("- Avg Doc Size: Average actual document size (excludes deletes where size is unknown)");
+            System.out.println("- Doc/Oplog Ratio: Higher ratio indicates documents much larger than their oplog entries");
+        } else {
+            System.out.println("- Use --fetchDocSizes option to see actual document sizes (slower but more accurate)");
         }
     }
     
