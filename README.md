@@ -18,7 +18,6 @@ A powerful command-line tool for analyzing MongoDB oplog (operations log) entrie
 ### Prerequisites
 
 - Java 8 or later
-- Maven (for building from source)
 - MongoDB replica set or sharded cluster with replication/oplog enabled
 
 ### Quick Install
@@ -38,14 +37,16 @@ The install script will:
 - Install the `oplog-analyzer` command to `~/.local/bin`
 - Configure your PATH if necessary
 
-### Manual Build
+### Direct Usage
+
+If you have the pre-built JAR file:
 
 ```bash
-# Build the project
-mvn clean package
-
-# The JAR will be created in bin/OplogAnalyzer.jar
+# Run directly with the JAR
 java -jar bin/OplogAnalyzer.jar --help
+
+# Or use it directly for analysis
+java -jar bin/OplogAnalyzer.jar tail -c mongodb://localhost:27017 --idStats
 ```
 
 ## Usage
@@ -440,23 +441,6 @@ oplog-analyzer tail -c mongodb+srv://user:pass@cluster.net/ \
    - Use `--limit` when tailing to prevent memory issues
    - For sharded clusters, use `--shardIndex` to analyze specific shards if needed
 
-## Building from Source
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/oplog-analyzer.git
-cd oplog-analyzer
-
-# Build with Maven
-mvn clean package
-
-# Run directly
-java -jar bin/OplogAnalyzer.jar --help
-
-# Or install
-./install.sh
-```
-
 ## Requirements
 
 - **Java**: Version 8 or later
@@ -470,6 +454,30 @@ To remove the installed command:
 
 ```bash
 ./uninstall.sh
+```
+
+## Building from Source
+
+Only needed if you want to modify the code or build from the latest source:
+
+### Prerequisites for Building
+- Java 8 or later
+- Maven 3.6 or later
+
+### Build Steps
+```bash
+# Clone the repository
+git clone https://github.com/mhelmstetter/oplog-analyzer.git
+cd oplog-analyzer
+
+# Build with Maven
+mvn clean package
+
+# The JAR will be created in bin/OplogAnalyzer.jar
+java -jar bin/OplogAnalyzer.jar --help
+
+# Or install the command
+./install.sh
 ```
 
 ## Contributing
