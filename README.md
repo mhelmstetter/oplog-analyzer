@@ -8,7 +8,9 @@ A powerful command-line tool for analyzing MongoDB oplog (operations log) entrie
 - **Real-time Monitoring**: Tail the oplog as new operations occur
 - **Size Threshold Filtering**: Focus on operations above a specified size threshold
 - **Statistical Reporting**: Track operation counts, sizes, and patterns
-- **ID Statistics**: Analyze frequently accessed document IDs
+- **ID Statistics**: Analyze frequently accessed document IDs with flexible thresholds
+- **Batch Document Size Fetching**: Get accurate document sizes for update operations
+- **Sharded Cluster Support**: Multi-threaded analysis across all shards simultaneously
 - **BSON Export**: Export oplog entries to BSON format for further analysis
 
 ## Installation
@@ -85,7 +87,6 @@ oplog-analyzer scan [options]
 | `-s, --startTime <timestamp>` | Start time (ISO 8601 format) | No | - |
 | `-e, --endTime <timestamp>` | End time (ISO 8601 format) | No | - |
 | `-d, --db <database>` | Database name to query | No | local |
-| `-x, --sheet <name>` | Excel sheet name for export | No | - |
 
 ### Examples
 
@@ -122,11 +123,14 @@ oplog-analyzer tail [options]
 | Option | Description | Required | Default |
 |--------|-------------|----------|---------|
 | `-c, --uri <uri>` | MongoDB connection string | Yes | - |
-| `-t, --threshold <bytes>` | Only show operations >= this size | No | MAX_VALUE |
+| `-t, --threshold <bytes>` | Only show operations >= this size for debug output | No | MAX_VALUE |
 | `-l, --limit <count>` | Stop after examining this many entries | No | unlimited |
 | `-d, --dump` | Dump BSON to output file | No | false |
 | `--idStats` | Enable _id statistics tracking | No | false |
+| `--idStatsThreshold <bytes>` | Minimum size for documents to include in ID statistics | No | 0 |
+| `--fetchDocSizes` | Fetch actual document sizes for updates (slower but accurate) | No | false |
 | `--topIdCount <n>` | Number of top frequent _id values to report | No | 20 |
+| `--shardIndex <indices>` | Comma-separated shard indices to analyze (e.g., 0,1,2) | No | all shards |
 
 ### Examples
 
@@ -134,16 +138,39 @@ oplog-analyzer tail [options]
 # Tail oplog in real-time
 oplog-analyzer tail -c mongodb://localhost:27017
 
-# Monitor large operations (>500KB) with statistics
+# Monitor large operations (>500KB) with basic ID statistics
 oplog-analyzer tail -c mongodb://localhost:27017 \
   -t 512000 \
   --idStats
 
-# Analyze first 10000 operations with ID tracking
+# Track all document IDs (default behavior)
 oplog-analyzer tail -c mongodb://localhost:27017 \
-  -l 10000 \
   --idStats \
   --topIdCount 50
+
+# Track only large documents in ID statistics
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --idStats \
+  --idStatsThreshold 100000 \
+  --topIdCount 20
+
+# Get accurate document sizes for updates (slower but precise)
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --idStats \
+  --fetchDocSizes \
+  --idStatsThreshold 50000
+
+# Different thresholds for debug vs statistics
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --threshold 1048576 \
+  --idStats \
+  --idStatsThreshold 10000 \
+  --fetchDocSizes
+
+# Analyze specific shards in a sharded cluster
+oplog-analyzer tail -c mongodb+srv://user:pass@cluster.net/ \
+  --shardIndex 0,2 \
+  --idStats
 
 # Dump oplog entries to BSON file
 oplog-analyzer tail -c mongodb://localhost:27017 \
@@ -176,14 +203,37 @@ Where:
 
 ### ID Statistics (tail command with --idStats)
 
-When enabled, shows the most frequently accessed document IDs:
+When enabled, shows the most frequently accessed document IDs. The output format depends on whether `--fetchDocSizes` is used:
 
+#### Basic Mode (fast, oplog sizes only)
 ```
 Top 20 most frequent _id values:
-Namespace::_id                                      count       min       max           avg
-========================================================================================
-mydb.users::507f1f77bcf86cd799439011                 125      1024      4096        2548.5
-mydb.orders::507f191e810c19729de860ea                 89       512      8192        3276.8
+Namespace::_id                             Count   Avg Oplog Size
+=============================================================================
+mydb.users::507f1f77bcf86cd799439011         125         2 KB
+mydb.orders::507f191e810c19729de860ea         89         1 KB
+
+Notes:
+- Count: Total operations on this _id (inserts + updates + deletes)
+- Avg Oplog Size: Average oplog entry size (small for updates/deletes, full for inserts)  
+- ID Statistics Threshold: 0 bytes (only documents >= this size are tracked)
+- Use --fetchDocSizes option to see actual document sizes (slower but more accurate)
+```
+
+#### Accurate Mode (with --fetchDocSizes)
+```
+Top 20 most frequent _id values:
+Namespace::_id                             Count    Avg Doc Size   Avg Oplog Size  Doc/Oplog Ratio
+========================================================================================================
+mydb.users::507f1f77bcf86cd799439011         125          2 MB           2 KB         1000.0x
+mydb.orders::507f191e810c19729de860ea         89         150 KB           1 KB          150.0x
+
+Notes:
+- Count: Total operations on this _id (inserts + updates + deletes)
+- Avg Oplog Size: Average oplog entry size (small for updates/deletes, full for inserts)
+- ID Statistics Threshold: 50000 bytes (only documents >= this size are tracked)  
+- Avg Doc Size: Average actual document size (excludes deletes where size is unknown)
+- Doc/Oplog Ratio: Higher ratio indicates documents much larger than their oplog entries
 ```
 
 ## Connection String Examples
@@ -205,6 +255,76 @@ mongodb+srv://username:password@cluster.mongodb.net/
 mongodb://localhost:27017/?readPreference=secondaryPreferred&ssl=true
 ```
 
+## Advanced Features
+
+### Sharded Cluster Analysis
+
+The oplog analyzer automatically detects sharded clusters and analyzes all shards simultaneously using multi-threading:
+
+```bash
+# Automatic shard detection and parallel analysis
+oplog-analyzer tail -c mongodb+srv://user:pass@cluster.mongodb.net/
+
+# Analyze specific shards only
+oplog-analyzer tail -c mongodb+srv://user:pass@cluster.mongodb.net/ \
+  --shardIndex 0,2,4
+```
+
+When connected to a sharded cluster, you'll see output like:
+```
+Detected sharded cluster - tailing all shards simultaneously
+Tailing 4 shards in parallel
+[atlas-shard-0] Processed 1,234 entries, Lag: 0s
+[atlas-shard-1] Processed 1,456 entries, Lag: 0s
+...
+```
+
+### Two-Threshold System
+
+The tool provides separate thresholds for different purposes:
+
+1. **Debug Threshold (`--threshold`)**: Controls which operations are displayed in real-time
+2. **Statistics Threshold (`--idStatsThreshold`)**: Controls which documents are included in ID statistics
+
+```bash
+# Show debug messages for operations >1MB, but track all documents in statistics
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --threshold 1048576 \
+  --idStats \
+  --idStatsThreshold 0
+
+# Track only large documents in both debug and statistics  
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --threshold 500000 \
+  --idStats \
+  --idStatsThreshold 500000
+```
+
+### Document Size Accuracy Modes
+
+#### Fast Mode (Default)
+- Uses oplog entry sizes only
+- No additional database queries
+- Good for identifying update patterns
+- Misleading for update operations (shows small oplog entry size, not actual document size)
+
+#### Accurate Mode (`--fetchDocSizes`)
+- Fetches actual document sizes via batch queries
+- Slower but provides true document sizes for updates
+- Batches queries (max 10 docs, 100ms timeout) for efficiency
+- Essential for accurate size-based analysis
+
+```bash
+# Fast mode - good for pattern analysis
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --idStats
+
+# Accurate mode - essential for size analysis  
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --idStats \
+  --fetchDocSizes
+```
+
 ## Use Cases
 
 ### Performance Analysis
@@ -219,26 +339,64 @@ oplog-analyzer scan -c mongodb://localhost:27017 \
 ### Real-time Debugging
 Monitor operations as they happen during application testing:
 ```bash
+# Fast debugging - track update patterns
 oplog-analyzer tail -c mongodb://localhost:27017 \
   --idStats \
-  -t 102400  # 100KB threshold
+  --threshold 102400
+
+# Accurate debugging - get true document sizes  
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --idStats \
+  --fetchDocSizes \
+  --threshold 102400
 ```
 
 ### Capacity Planning
 Analyze operation patterns over time:
 ```bash
+# Historical analysis
 oplog-analyzer scan -c mongodb://localhost:27017 \
   -s 2025-01-01T00:00:00Z \
   -e 2025-01-08T00:00:00Z
+
+# Real-time capacity monitoring with accurate sizes
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --idStats \
+  --fetchDocSizes \
+  --idStatsThreshold 10000 \
+  -l 50000
 ```
 
 ### Hot Document Detection
 Find documents that are frequently accessed:
 ```bash
+# Track all document access patterns (fast)
 oplog-analyzer tail -c mongodb://localhost:27017 \
   --idStats \
   --topIdCount 100 \
   -l 100000
+
+# Track only large document access patterns (accurate)
+oplog-analyzer tail -c mongodb://localhost:27017 \
+  --idStats \
+  --fetchDocSizes \
+  --idStatsThreshold 50000 \
+  --topIdCount 50 \
+  -l 100000
+```
+
+### Sharded Cluster Monitoring
+Monitor operations across a sharded cluster:
+```bash
+# Monitor all shards
+oplog-analyzer tail -c mongodb+srv://user:pass@cluster.net/ \
+  --idStats \
+  --fetchDocSizes
+
+# Monitor specific shards only
+oplog-analyzer tail -c mongodb+srv://user:pass@cluster.net/ \
+  --shardIndex 0,2 \
+  --idStats
 ```
 
 ## Understanding the Output
@@ -268,10 +426,19 @@ oplog-analyzer tail -c mongodb://localhost:27017 \
    - Install Java 8 or later
    - Ensure Java is in your PATH
 
-4. **Performance considerations**
-   - Use threshold filtering to reduce output volume
+4. **"No ID statistics appear"**
+   - Ensure you're using `--idStats` option
+   - Check `--idStatsThreshold` - default is 0 (tracks all documents)
+   - Verify operations are occurring that exceed your threshold
+   - Use `--topIdCount` to increase the number of results shown
+
+5. **Performance considerations**
+   - Use `--threshold` to reduce debug output volume
+   - Use `--idStatsThreshold` to limit statistics collection 
+   - Avoid `--fetchDocSizes` for high-volume environments unless needed
    - Set reasonable time ranges for scan operations
-   - Use limits when tailing to prevent memory issues
+   - Use `--limit` when tailing to prevent memory issues
+   - For sharded clusters, use `--shardIndex` to analyze specific shards if needed
 
 ## Building from Source
 
