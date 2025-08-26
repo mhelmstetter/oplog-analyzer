@@ -61,57 +61,17 @@ oplog-analyzer <subcommand> [options]
 
 ### Available Subcommands
 
-- `scan` - Analyze historical oplog entries within a time range
-- `tail` - Monitor oplog entries in real-time
+- `tail` - Monitor oplog entries in real-time (**recommended** - more efficient)
+- `scan` - Analyze historical oplog entries within a time range (resource intensive)
 
 ### Global Options
 
 - `--help` - Show help message
 - `--version` - Show version information
 
-## Scan Command (Historical Analysis)
-
-Analyze oplog entries between specific timestamps for retrospective analysis.
-
-### Syntax
-
-```bash
-oplog-analyzer scan [options]
-```
-
-### Options
-
-| Option | Description | Required | Default |
-|--------|-------------|----------|---------|
-| `-c, --uri <uri>` | MongoDB connection string | Yes | - |
-| `-t, --threshold <bytes>` | Only show operations >= this size | No | MAX_VALUE |
-| `-s, --startTime <timestamp>` | Start time (ISO 8601 format) | No | - |
-| `-e, --endTime <timestamp>` | End time (ISO 8601 format) | No | - |
-| `-d, --db <database>` | Database name to query | No | local |
-
-### Examples
-
-```bash
-# Analyze oplog for the last 24 hours
-oplog-analyzer scan -c mongodb://localhost:27017 \
-  -s 2025-01-01T00:00:00Z \
-  -e 2025-01-02T00:00:00Z
-
-# Find large operations (>1MB) in the past hour
-oplog-analyzer scan -c mongodb://localhost:27017 \
-  -t 1048576 \
-  -s 2025-01-01T12:00:00Z \
-  -e 2025-01-01T13:00:00Z
-
-# Analyze specific database operations
-oplog-analyzer scan -c mongodb://localhost:27017 \
-  -d myDatabase \
-  -s 2025-01-01T00:00:00Z
-```
-
 ## Tail Command (Real-time Monitoring)
 
-Monitor oplog entries as they occur in real-time, useful for debugging and monitoring active operations.
+Monitor oplog entries as they occur in real-time, useful for debugging and monitoring active operations. **This is the recommended approach** as it's more efficient than scanning - current oplog entries are likely cached in memory, whereas scanning requires reading through the entire oplog history.
 
 ### Syntax
 
@@ -235,6 +195,46 @@ Notes:
 - ID Statistics Threshold: 50000 bytes (only documents >= this size are tracked)  
 - Avg Doc Size: Average actual document size (excludes deletes where size is unknown)
 - Doc/Oplog Ratio: Higher ratio indicates documents much larger than their oplog entries
+```
+
+## Scan Command (Historical Analysis)
+
+Analyze oplog entries between specific timestamps for retrospective analysis. **Note**: This approach is more resource-intensive than tailing as it requires scanning through the entire oplog history rather than processing current cached entries.
+
+### Syntax
+
+```bash
+oplog-analyzer scan [options]
+```
+
+### Options
+
+| Option | Description | Required | Default |
+|--------|-------------|----------|---------|
+| `-c, --uri <uri>` | MongoDB connection string | Yes | - |
+| `-t, --threshold <bytes>` | Only show operations >= this size | No | MAX_VALUE |
+| `-s, --startTime <timestamp>` | Start time (ISO 8601 format) | No | - |
+| `-e, --endTime <timestamp>` | End time (ISO 8601 format) | No | - |
+| `-d, --db <database>` | Database name to query | No | local |
+
+### Examples
+
+```bash
+# Analyze oplog for the last 24 hours
+oplog-analyzer scan -c mongodb://localhost:27017 \
+  -s 2025-01-01T00:00:00Z \
+  -e 2025-01-02T00:00:00Z
+
+# Find large operations (>1MB) in the past hour
+oplog-analyzer scan -c mongodb://localhost:27017 \
+  -t 1048576 \
+  -s 2025-01-01T12:00:00Z \
+  -e 2025-01-01T13:00:00Z
+
+# Analyze specific database operations
+oplog-analyzer scan -c mongodb://localhost:27017 \
+  -d myDatabase \
+  -s 2025-01-01T00:00:00Z
 ```
 
 ## Connection String Examples
