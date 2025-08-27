@@ -286,7 +286,7 @@ public class TailCommand implements Callable<Integer> {
             
             // Check main threshold for debug reporting
             if (actualSize >= threshold) {
-                debug(shardId, update.ns, update.id, actualSize);
+                logThresholdExceeded(shardId, update.ns, "u", actualSize, update.doc);
             }
             
             // Check ID statistics threshold separately
@@ -314,7 +314,7 @@ public class TailCommand implements Callable<Integer> {
             
             // Check main threshold for debug reporting (using oplog size - not ideal but fast)
             if (oplogSize >= threshold) {
-                debug(shardId, ns, id, oplogSize);
+                logThresholdExceeded(shardId, ns, opType, oplogSize, doc);
             }
             
             // Check ID statistics threshold separately (using oplog size)
@@ -438,7 +438,7 @@ public class TailCommand implements Callable<Integer> {
                             // Check main threshold for debug reporting
                             if (docSize >= threshold) {
                                 if (id != null) {
-                                    debug(shardId, ns, id, docSize);
+                                    logThresholdExceeded(shardId, ns, opType, docSize, doc);
                                 } else {
                                     System.out.println("doc exceeded threshold, but no _id in the 'o' field");
                                 }
@@ -763,12 +763,41 @@ public class TailCommand implements Callable<Integer> {
         logger.info("Total processed across all shards: {} entries", String.format("%,d", totalCount));
     }
     
-    private void debug(String shardId, String ns, BsonValue id, long docSize) {
-        if (id != null) {
-            String idVal = getIdString(id);
-            String sizeDisplay = org.apache.commons.io.FileUtils.byteCountToDisplaySize(docSize);
-            System.out.println(String.format("[%s] %s doc exceeded threshold (%s): {_id: %s }", 
-                shardId, ns, sizeDisplay, idVal));
+    /**
+     * Log when an operation exceeds the threshold (consistent with BaseOplogCommand)
+     */
+    private void logThresholdExceeded(String shardId, String ns, String opType, long docSize, RawBsonDocument doc) {
+        // Extract the _id for better debugging
+        BsonValue id = extractId(doc, opType);
+        String idString = id != null ? getIdString(id) : "unknown";
+        String sizeDisplay = org.apache.commons.io.FileUtils.byteCountToDisplaySize(docSize);
+        
+        if (shardId != null && !shardId.isEmpty()) {
+            System.out.println(String.format("[%s] %s doc exceeded threshold (%s): {_id: %s }",
+                shardId, ns, sizeDisplay, idString));
+        } else {
+            System.out.println(String.format("%s doc exceeded threshold (%s): {_id: %s }",
+                ns, sizeDisplay, idString));
+        }
+    }
+    
+    /**
+     * Extract the _id from an oplog entry based on operation type (consistent with BaseOplogCommand)
+     */
+    private BsonValue extractId(RawBsonDocument doc, String opType) {
+        try {
+            if ("u".equals(opType)) {
+                // For updates, _id is in o2 field
+                BsonDocument o2 = doc.getDocument("o2");
+                return o2 != null ? o2.get("_id") : null;
+            } else {
+                // For inserts and deletes, _id is in o field
+                BsonDocument o = doc.getDocument("o");
+                return o != null ? o.get("_id") : null;
+            }
+        } catch (Exception e) {
+            // If we can't extract the ID, just return null
+            return null;
         }
     }
     

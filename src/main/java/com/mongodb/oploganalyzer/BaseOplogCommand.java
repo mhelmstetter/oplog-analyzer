@@ -8,10 +8,13 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.GZIPInputStream;
 
+import org.bson.BsonBinary;
+import org.bson.BsonBinarySubType;
 import org.bson.BsonDocument;
 import org.bson.BsonValue;
 import org.bson.RawBsonDocument;
@@ -19,6 +22,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.mongodb.shardsync.ShardClient;
+import com.mongodb.util.bson.BsonUuidUtil;
+import com.mongodb.util.bson.BsonValueConverter;
 
 import picocli.CommandLine.Option;
 
@@ -145,13 +150,98 @@ public abstract class BaseOplogCommand implements Callable<Integer> {
      * Log when an operation exceeds the threshold
      */
     protected void logThresholdExceeded(String shardId, String ns, String opType, long docSize, RawBsonDocument doc) {
+        // Extract the _id for better debugging
+        BsonValue id = extractId(doc, opType);
+        String idString = id != null ? getIdString(id) : "unknown";
+        String sizeDisplay = org.apache.commons.io.FileUtils.byteCountToDisplaySize(docSize);
+        
         if (shardId != null && !shardId.isEmpty()) {
-            System.out.println(String.format("[%s] %s operation in %s exceeded threshold: %d bytes",
-                shardId, opType, ns, docSize));
+            System.out.println(String.format("[%s] %s doc exceeded threshold (%s): {_id: %s }",
+                shardId, ns, sizeDisplay, idString));
         } else {
-            System.out.println(String.format("%s operation in %s exceeded threshold: %d bytes",
-                opType, ns, docSize));
+            System.out.println(String.format("%s doc exceeded threshold (%s): {_id: %s }",
+                ns, sizeDisplay, idString));
         }
+    }
+    
+    /**
+     * Format an ID value for display using the same logic as IdStatisticsManager
+     */
+    protected String getIdString(BsonValue id) {
+        if (id == null) {
+            return "null";
+        }
+        
+        // Special handling for different BSON types
+        switch (id.getBsonType()) {
+            case BINARY:
+                BsonBinary binary = id.asBinary();
+                byte subtype = binary.getType();
+                
+                // Handle UUID types specially
+                if (subtype == BsonBinarySubType.UUID_STANDARD.getValue() || 
+                    subtype == BsonBinarySubType.UUID_LEGACY.getValue()) {
+                    try {
+                        UUID uuid = BsonUuidUtil.convertBsonBinaryToUuid(binary);
+                        return uuid.toString();
+                    } catch (Exception e) {
+                        // Fall back to hex if UUID conversion fails
+                    }
+                }
+                
+                // For other binary types, show as compact hex
+                byte[] data = binary.getData();
+                if (data.length <= 16) {
+                    // Short binary - show full hex
+                    return toHexString(data);
+                } else {
+                    // Long binary - show truncated hex with length indicator
+                    return toHexString(data, 8) + "..." + String.format("(%d bytes)", data.length);
+                }
+                
+            case OBJECT_ID:
+                // ObjectId already has a clean toString
+                return id.asObjectId().getValue().toHexString();
+                
+            case STRING:
+                return id.asString().getValue();
+                
+            case INT32:
+                return String.valueOf(id.asInt32().getValue());
+                
+            case INT64:
+                return String.valueOf(id.asInt64().getValue());
+                
+            case DOUBLE:
+                return String.valueOf(id.asDouble().getValue());
+                
+            case BOOLEAN:
+                return String.valueOf(id.asBoolean().getValue());
+                
+            default:
+                // Fall back to BsonValueConverter for other types
+                Object converted = BsonValueConverter.convertBsonValueToObject(id);
+                return converted != null ? converted.toString() : id.toString();
+        }
+    }
+    
+    /**
+     * Convert byte array to hex string
+     */
+    private String toHexString(byte[] bytes) {
+        return toHexString(bytes, bytes.length);
+    }
+    
+    /**
+     * Convert byte array to hex string with specified length
+     */
+    private String toHexString(byte[] bytes, int maxBytes) {
+        StringBuilder hex = new StringBuilder();
+        int limit = Math.min(bytes.length, maxBytes);
+        for (int i = 0; i < limit; i++) {
+            hex.append(String.format("%02x", bytes[i] & 0xFF));
+        }
+        return hex.toString();
     }
     
     /**
