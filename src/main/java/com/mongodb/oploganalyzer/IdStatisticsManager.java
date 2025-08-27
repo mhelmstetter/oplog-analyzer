@@ -2,12 +2,17 @@ package com.mongodb.oploganalyzer;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
+import org.bson.BsonBinary;
+import org.bson.BsonBinarySubType;
 import org.bson.BsonValue;
+import org.bson.types.ObjectId;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.mongodb.util.bson.BsonUuidUtil;
 import com.mongodb.util.bson.BsonValueConverter;
 
 /**
@@ -177,13 +182,76 @@ public class IdStatisticsManager {
             return "null";
         }
         
-        // Use BsonValueConverter to get clean representation
-        Object converted = BsonValueConverter.convertBsonValueToObject(id);
-        if (converted != null) {
-            return converted.toString();
-        } else {
-            return "null";
+        // Special handling for different BSON types
+        switch (id.getBsonType()) {
+            case BINARY:
+                BsonBinary binary = id.asBinary();
+                byte subtype = binary.getType();
+                
+                // Handle UUID types specially
+                if (subtype == BsonBinarySubType.UUID_STANDARD.getValue() || 
+                    subtype == BsonBinarySubType.UUID_LEGACY.getValue()) {
+                    try {
+                        UUID uuid = BsonUuidUtil.convertBsonBinaryToUuid(binary);
+                        return uuid.toString();
+                    } catch (Exception e) {
+                        // Fall back to hex if UUID conversion fails
+                    }
+                }
+                
+                // For other binary types, show as compact hex
+                byte[] data = binary.getData();
+                if (data.length <= 16) {
+                    // Short binary - show full hex
+                    return toHexString(data);
+                } else {
+                    // Long binary - show truncated hex with length indicator
+                    return toHexString(data, 8) + "..." + String.format("(%d bytes)", data.length);
+                }
+                
+            case OBJECT_ID:
+                // ObjectId already has a clean toString
+                return id.asObjectId().getValue().toHexString();
+                
+            case STRING:
+                return id.asString().getValue();
+                
+            case INT32:
+                return String.valueOf(id.asInt32().getValue());
+                
+            case INT64:
+                return String.valueOf(id.asInt64().getValue());
+                
+            case DOUBLE:
+                return String.valueOf(id.asDouble().getValue());
+                
+            case BOOLEAN:
+                return String.valueOf(id.asBoolean().getValue());
+                
+            default:
+                // Fall back to BsonValueConverter for other types
+                Object converted = BsonValueConverter.convertBsonValueToObject(id);
+                return converted != null ? converted.toString() : id.toString();
         }
+    }
+    
+    /**
+     * Convert byte array to hex string
+     */
+    private String toHexString(byte[] bytes) {
+        return toHexString(bytes, bytes.length);
+    }
+    
+    /**
+     * Convert byte array to hex string with specified length
+     */
+    private String toHexString(byte[] bytes, int maxBytes) {
+        StringBuilder hex = new StringBuilder();
+        int limit = Math.min(bytes.length, maxBytes);
+        for (int i = 0; i < limit; i++) {
+            hex.append(String.format("%02x", bytes[i] & 0xFF));
+        }
+        return hex.toString();
     }
     
     private String formatIdKey(String idKey) {
