@@ -11,8 +11,6 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -38,17 +36,13 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
 @Command(name = "scan", description = "Scan oplog entries within a time range")
-public class ScanCommand implements Callable<Integer> {
+public class ScanCommand extends BaseOplogCommand {
     
     private static Logger logger = LoggerFactory.getLogger(ScanCommand.class);
     
     private final static SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd HH.mm.ssZ");
     
-    @Option(names = {"-c", "--uri"}, description = "MongoDB connection string URI", required = true)
-    private String uri;
-    
-    @Option(names = {"-t", "--threshold"}, description = "Log operations >= this size (bytes)")
-    private Long threshold = Long.MAX_VALUE;
+    // URI and threshold options inherited from BaseOplogCommand
     
     @Option(names = {"-s", "--startTime"}, description = "Start time (yyyy-MM-ddTHH:mm.sssZ)")
     private String startTimeStr;
@@ -62,12 +56,8 @@ public class ScanCommand implements Callable<Integer> {
     @Option(names = {"-x", "--sheet"}, description = "Excel sheet name")
     private String sheetName;
     
-    @Option(names = {"--shardIndex"}, description = "Comma-separated list of shard indices to analyze (0,1,2...), default: all shards")
-    private String shardIndexes;
-    
-    private Map<OplogEntryKey, EntryAccumulator> accumulators = new ConcurrentHashMap<OplogEntryKey, EntryAccumulator>();
-    private ShardClient shardClient;
-    private boolean stop = false;
+    // Shard and ID stats options inherited from BaseOplogCommand
+    // accumulators, idStatisticsManager, shardClient, and stop inherited from BaseOplogCommand
     private Date startTime;
     private Date endTime;
     private File file;
@@ -76,25 +66,33 @@ public class ScanCommand implements Callable<Integer> {
     @Override
     public Integer call() {
         try {
+            validateInput();
             initializeClient();
             parseTimeOptions();
             setupSheetName();
             setupShutdownHook();
-            process();
+            
+            if (inputFile != null) {
+                // Process from BSON file
+                processBsonFile();
+            } else {
+                // Process from MongoDB
+                process();
+            }
+            
             report();
             return 0;
         } catch (IOException e) {
             logger.error("Error processing oplog", e);
             return 1;
+        } catch (IllegalArgumentException e) {
+            System.err.println("Error: " + e.getMessage());
+            return 1;
         }
     }
     
     private void initializeClient() {
-        if (shardClient == null) {
-            shardClient = new ShardClient("oplog-analyzer", uri);
-            shardClient.init();
-            shardClient.populateShardMongoClients();
-        }
+        initializeCommon();
     }
     
     private void parseTimeOptions() {
@@ -118,14 +116,7 @@ public class ScanCommand implements Callable<Integer> {
         }
     }
     
-    private void setupShutdownHook() {
-        Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
-            public void run() {
-                System.out.println("**** SHUTDOWN *****");
-                stop();
-            }
-        }));
-    }
+    // setupShutdownHook() method inherited from BaseOplogCommand
     
     private static Date parseDate(String s) {
         TemporalAccessor ta = DateTimeFormatter.ISO_INSTANT.parse(s);
@@ -260,46 +251,8 @@ public class ScanCommand implements Callable<Integer> {
             while (cursor.hasNext() && !stop) {
                 RawBsonDocument doc = cursor.next();
                 
-                long docSize = doc.getByteBuffer().remaining();
-                if (docSize >= threshold) {
-                    String ns = doc.getString("ns").getValue();
-                    BsonValue op = doc.get("op");
-                    String opType = op.asString().getValue();
-                    
-                    // Handle applyOps operations (transactions/bulk ops)
-                    if ("c".equals(opType) && ns.endsWith(".$cmd")) {
-                        BsonDocument o = (BsonDocument) doc.get("o");
-                        if (o != null && o.containsKey("applyOps")) {
-                            BsonArray applyOps = o.getArray("applyOps");
-                            for (BsonValue applyOp : applyOps) {
-                                if (applyOp.isDocument()) {
-                                    BsonDocument innerOp = applyOp.asDocument();
-                                    String innerNs = innerOp.getString("ns", new BsonString("unknown")).getValue();
-                                    String innerOpType = innerOp.getString("op", new BsonString("unknown")).getValue();
-                                    
-                                    if (!innerNs.startsWith("config.")) {
-                                        OplogEntryKey innerKey = new OplogEntryKey(innerNs, innerOpType);
-                                        EntryAccumulator innerAcc = targetAccumulators.get(innerKey);
-                                        if (innerAcc == null) {
-                                            innerAcc = new EntryAccumulator(innerKey);
-                                            targetAccumulators.put(innerKey, innerAcc);
-                                        }
-                                        innerAcc.addExecution(docSize / applyOps.size());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Always track the outer operation too
-                    OplogEntryKey key = new OplogEntryKey(ns, opType);
-                    EntryAccumulator acc = targetAccumulators.get(key);
-                    if (acc == null) {
-                        acc = new EntryAccumulator(key);
-                        targetAccumulators.put(key, acc);
-                    }
-                    acc.addExecution(docSize);
-                }
+                // Process the oplog entry using base class method
+                processOplogEntryWithApplyOps(doc, shardId, targetAccumulators);
                 count++;
                 
                 if (count % 10000 == 0) {
@@ -333,20 +286,43 @@ public class ScanCommand implements Callable<Integer> {
         return totalEntries;
     }
     
-    public void report() {
-        System.out.println();
-        System.out.println("========== OPLOG ANALYSIS REPORT ==========");
-        System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", "Namespace", "op", "count", "min", "max",
-                "avg", "total (size)"));
-        System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", 
-            "=".repeat(80), "=".repeat(5), "=".repeat(15), "=".repeat(15), "=".repeat(15), "=".repeat(15), "=".repeat(30)));
+    /**
+     * Process oplog entry with support for applyOps (transactions/bulk ops)
+     */
+    private void processOplogEntryWithApplyOps(RawBsonDocument doc, String shardId, Map<OplogEntryKey, EntryAccumulator> targetAccumulators) {
+        long docSize = doc.getByteBuffer().remaining();
+        String ns = doc.getString("ns").getValue();
+        String opType = doc.getString("op").getValue();
         
-        accumulators.values().stream()
-            .sorted((e1, e2) -> Long.compare(e2.getTotal(), e1.getTotal()))
-            .forEach(acc -> System.out.println(acc));
+        // Handle applyOps operations (transactions/bulk ops)
+        if ("c".equals(opType) && ns.endsWith(".$cmd")) {
+            BsonDocument o = doc.getDocument("o");
+            if (o != null && o.containsKey("applyOps")) {
+                BsonArray applyOps = o.getArray("applyOps");
+                for (BsonValue applyOp : applyOps) {
+                    if (applyOp.isDocument()) {
+                        BsonDocument innerOp = applyOp.asDocument();
+                        String innerNs = innerOp.getString("ns", new BsonString("unknown")).getValue();
+                        String innerOpType = innerOp.getString("op", new BsonString("unknown")).getValue();
+                        
+                        if (!innerNs.startsWith("config.")) {
+                            OplogEntryKey innerKey = new OplogEntryKey(innerNs, innerOpType);
+                            EntryAccumulator innerAcc = targetAccumulators.get(innerKey);
+                            if (innerAcc == null) {
+                                innerAcc = new EntryAccumulator(innerKey);
+                                targetAccumulators.put(innerKey, innerAcc);
+                            }
+                            innerAcc.addExecution(docSize / applyOps.size());
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Process with base class method (handles accumulator, ID stats, threshold logging)
+        processOplogEntry(doc, shardId);
     }
     
-    protected void stop() {
-        stop = true;
-    }
+    // report() method inherited from BaseOplogCommand
+    // stop() method inherited from BaseOplogCommand
 }
