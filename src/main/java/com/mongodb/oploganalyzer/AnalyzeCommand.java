@@ -170,6 +170,9 @@ public class AnalyzeCommand implements Callable<Integer> {
     }
     
     private void processBsonStream(InputStream inputStream, String sourceName) throws IOException {
+        // Extract shard ID from filename
+        currentShardId = extractShardIdFromFileName(sourceName);
+        
         byte[] sizeBytes = new byte[4];
         long count = 0;
         
@@ -502,21 +505,24 @@ public class AnalyzeCommand implements Callable<Integer> {
         }
     }
     
-    private String extractShardId(RawBsonDocument doc) {
-        // Try to extract shard ID from oplog entry metadata
+    private String currentShardId = "unknown"; // Set when processing each file
+    
+    private String extractShardIdFromFileName(String fileName) {
+        // Extract shard ID from filename pattern: oplog_sample_<timestamp>_<shard>.bson(.gz)
         try {
-            // Look for shard ID in the document (sometimes present in replication metadata)
-            BsonValue shardValue = doc.get("shard");
-            if (shardValue instanceof BsonString) {
-                return shardValue.asString().getValue();
+            String baseName = fileName.replaceAll("\\.bson(\\.gz)?$", "");
+            int lastUnderscore = baseName.lastIndexOf("_");
+            if (lastUnderscore > 0 && lastUnderscore < baseName.length() - 1) {
+                return baseName.substring(lastUnderscore + 1);
             }
-            
-            // If not found, try to infer from wall clock or other metadata
-            // For now, use "unknown" but this could be enhanced
-            return "unknown";
         } catch (Exception e) {
-            return "unknown";
+            // Fall back to unknown if extraction fails
         }
+        return "unknown";
+    }
+    
+    private String extractShardId(RawBsonDocument doc) {
+        return currentShardId; // Use the shard ID from the filename
     }
     
     private BsonValue extractDocumentId(RawBsonDocument doc) {

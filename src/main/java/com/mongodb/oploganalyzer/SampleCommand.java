@@ -63,10 +63,11 @@ public class SampleCommand extends BaseOplogCommand {
     // Per-shard per-namespace ID sampling cache
     private final Map<String, Map<String, Set<String>>> shardNamespaceIdCache = new ConcurrentHashMap<>();
     
-    // Output file handling
-    private FileChannel channel;
-    private GZIPOutputStream gzipOutputStream;
+    // Output file handling - per shard
+    private final Map<String, FileChannel> shardChannels = new ConcurrentHashMap<>();
+    private final Map<String, GZIPOutputStream> shardGzipStreams = new ConcurrentHashMap<>();
     private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss");
+    private String baseFileName;
     
     // Statistics
     private final AtomicLong totalEntriesProcessed = new AtomicLong(0);
@@ -131,17 +132,8 @@ public class SampleCommand extends BaseOplogCommand {
     }
     
     private void initOutputFile() throws IOException {
-        String fileName = String.format("oplog_sample_%s.bson", dateFormat.format(new java.util.Date()));
-        if (compress) {
-            fileName += ".gz";
-            FileOutputStream fos = new FileOutputStream(fileName);
-            gzipOutputStream = new GZIPOutputStream(fos);
-            channel = null; // Will write through gzip stream
-        } else {
-            FileOutputStream fos = new FileOutputStream(fileName);
-            channel = fos.getChannel();
-        }
-        System.out.println("Sampling to file: " + fileName);
+        baseFileName = String.format("oplog_sample_%s", dateFormat.format(new java.util.Date()));
+        System.out.println("Sampling to files: " + baseFileName + "_<shard>.bson" + (compress ? ".gz" : ""));
     }
     
     private void sampleReplicaSet() throws IOException {
@@ -220,7 +212,7 @@ public class SampleCommand extends BaseOplogCommand {
                     
                     // Check if we should sample this entry
                     if (shouldSample(shardId, ns, idString)) {
-                        writeSample(doc);
+                        writeSample(shardId, doc);
                         totalEntriesSampled.incrementAndGet();
                     }
                     
@@ -312,20 +304,46 @@ public class SampleCommand extends BaseOplogCommand {
         return sb.toString();
     }
     
-    private synchronized void writeSample(RawBsonDocument doc) {
+    private synchronized void writeSample(String shardId, RawBsonDocument doc) {
         try {
-            if (compress && gzipOutputStream != null) {
-                ByteBuffer buffer = doc.getByteBuffer().asNIO();
-                byte[] bytes = new byte[buffer.remaining()];
-                buffer.get(bytes);
-                gzipOutputStream.write(bytes);
-                gzipOutputStream.flush();
-            } else if (channel != null) {
-                ByteBuffer buffer = doc.getByteBuffer().asNIO();
-                channel.write(buffer);
+            if (compress) {
+                GZIPOutputStream gzipStream = shardGzipStreams.computeIfAbsent(shardId, k -> {
+                    try {
+                        String fileName = String.format("%s_%s.bson.gz", baseFileName, k);
+                        FileOutputStream fos = new FileOutputStream(fileName);
+                        return new GZIPOutputStream(fos);
+                    } catch (IOException e) {
+                        logger.error("Error creating gzip stream for shard {}", k, e);
+                        return null;
+                    }
+                });
+                
+                if (gzipStream != null) {
+                    ByteBuffer buffer = doc.getByteBuffer().asNIO();
+                    byte[] bytes = new byte[buffer.remaining()];
+                    buffer.get(bytes);
+                    gzipStream.write(bytes);
+                    gzipStream.flush();
+                }
+            } else {
+                FileChannel channel = shardChannels.computeIfAbsent(shardId, k -> {
+                    try {
+                        String fileName = String.format("%s_%s.bson", baseFileName, k);
+                        FileOutputStream fos = new FileOutputStream(fileName);
+                        return fos.getChannel();
+                    } catch (IOException e) {
+                        logger.error("Error creating channel for shard {}", k, e);
+                        return null;
+                    }
+                });
+                
+                if (channel != null) {
+                    ByteBuffer buffer = doc.getByteBuffer().asNIO();
+                    channel.write(buffer);
+                }
             }
         } catch (Exception e) {
-            logger.error("Error writing sample", e);
+            logger.error("Error writing sample for shard {}", shardId, e);
         }
     }
     
@@ -392,9 +410,9 @@ public class SampleCommand extends BaseOplogCommand {
             
             System.out.printf("Found %d sharded collections%n", collections.size());
             
-            // Write all config.collections documents to the sample file
+            // Write config.collections documents to the first shard file (or dedicated config file)
             for (RawBsonDocument doc : collections) {
-                writeSample(doc);
+                writeSample("config", doc);
                 totalEntriesSampled.incrementAndGet();
             }
             
@@ -409,16 +427,29 @@ public class SampleCommand extends BaseOplogCommand {
             statusMonitor.shutdown();
         }
         
-        try {
-            if (gzipOutputStream != null) {
-                gzipOutputStream.finish();
-                gzipOutputStream.close();
+        // Close all shard GZIP streams
+        for (Map.Entry<String, GZIPOutputStream> entry : shardGzipStreams.entrySet()) {
+            try {
+                GZIPOutputStream gzipStream = entry.getValue();
+                if (gzipStream != null) {
+                    gzipStream.finish();
+                    gzipStream.close();
+                }
+            } catch (IOException e) {
+                logger.error("Error closing gzip stream for shard {}", entry.getKey(), e);
             }
-            if (channel != null) {
-                channel.close();
+        }
+        
+        // Close all shard channels
+        for (Map.Entry<String, FileChannel> entry : shardChannels.entrySet()) {
+            try {
+                FileChannel channel = entry.getValue();
+                if (channel != null) {
+                    channel.close();
+                }
+            } catch (IOException e) {
+                logger.error("Error closing channel for shard {}", entry.getKey(), e);
             }
-        } catch (IOException e) {
-            logger.error("Error closing output file", e);
         }
     }
 }
