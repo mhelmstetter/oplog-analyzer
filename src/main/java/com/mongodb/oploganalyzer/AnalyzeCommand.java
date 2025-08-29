@@ -1,8 +1,10 @@
 package com.mongodb.oploganalyzer;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -22,6 +24,10 @@ import org.bson.BsonValue;
 import org.bson.RawBsonDocument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonElement;
 
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -47,12 +53,18 @@ public class AnalyzeCommand implements Callable<Integer> {
     @Option(names = {"--workloadGrouping"}, description = "Group and classify workload patterns", defaultValue = "true") 
     private boolean workloadGrouping = true;
     
+    @Option(names = {"--statsFile"}, description = "JSON stats report file from sample command")
+    private String statsFile;
+    
     // Analysis results
     private final Map<String, ShardWorkload> shardWorkloads = new HashMap<>();
     private final Map<String, ShardKeyInfo> shardKeys = new HashMap<>();
     private final Map<String, CollectionPattern> collectionPatterns = new HashMap<>();
     private final Map<String, Map<String, UpdateStats>> idUpdateFrequency = new HashMap<>(); // namespace -> id -> stats
     private final Map<String, Map<String, Map<String, UpdateStats>>> shardIdUpdateFrequency = new HashMap<>(); // shard -> namespace -> id -> stats
+    
+    // Full shard statistics from stats report
+    private Map<String, Map<String, EntryAccumulator>> fullShardStats = new HashMap<>(); // shard -> key -> accumulator
     
     static class UpdateStats {
         int count = 0;
@@ -114,6 +126,12 @@ public class AnalyzeCommand implements Callable<Integer> {
             if (inputFiles.isEmpty()) {
                 System.err.println("No BSON files found to analyze. Use --pattern to specify file pattern.");
                 return 1;
+            }
+            
+            // Process stats file first if provided
+            if (statsFile != null) {
+                System.out.printf("Loading full statistics from: %s%n", statsFile);
+                loadStatsReport(statsFile);
             }
             
             System.out.printf("Analyzing %d BSON files...%n", inputFiles.size());
@@ -685,6 +703,88 @@ public class AnalyzeCommand implements Callable<Integer> {
             this.totalOps = totalOps;
             this.totalBytes = totalBytes;
             this.uniqueIds = uniqueIds;
+        }
+    }
+    
+    private void loadStatsReport(String fileName) throws IOException {
+        try (BufferedReader reader = new BufferedReader(new FileReader(fileName))) {
+            Gson gson = new Gson();
+            JsonObject jsonObject = gson.fromJson(reader, JsonObject.class);
+            
+            JsonObject shards = jsonObject.getAsJsonObject("shards");
+            if (shards == null) return;
+            
+            // Parse each shard's statistics
+            for (Map.Entry<String, JsonElement> shardEntry : shards.entrySet()) {
+                String shardId = shardEntry.getKey();
+                JsonObject shardData = shardEntry.getValue().getAsJsonObject();
+                
+                parseShardStatsFromJson(shardId, shardData);
+            }
+            
+            // Update shard workloads from full stats
+            updateShardWorkloadsFromFullStats();
+        }
+    }
+    
+    private void parseShardStatsFromJson(String shardId, JsonObject shardData) {
+        Map<String, EntryAccumulator> shardStats = new HashMap<>();
+        
+        JsonObject collections = shardData.getAsJsonObject("collections");
+        if (collections == null) return;
+        
+        for (Map.Entry<String, JsonElement> collEntry : collections.entrySet()) {
+            String collectionKey = collEntry.getKey(); // "namespace.optype"
+            JsonObject stats = collEntry.getValue().getAsJsonObject();
+            
+            // Parse namespace and operation type
+            int lastDot = collectionKey.lastIndexOf('.');
+            if (lastDot == -1) continue;
+            
+            String namespace = collectionKey.substring(0, lastDot);
+            String opType = collectionKey.substring(lastDot + 1);
+            
+            // Create accumulator from JSON data
+            OplogEntryKey key = new OplogEntryKey(namespace, opType);
+            EntryAccumulator acc = new EntryAccumulator(key);
+            
+            // Manually set the accumulator values based on JSON
+            long count = stats.get("count").getAsLong();
+            long totalBytes = stats.get("totalBytes").getAsLong();
+            long minBytes = stats.get("minBytes").getAsLong();
+            long maxBytes = stats.get("maxBytes").getAsLong();
+            
+            // Add executions to reach the target values
+            for (int i = 0; i < count; i++) {
+                if (i == 0) acc.addExecution(minBytes);
+                else if (i == 1 && count > 1) acc.addExecution(maxBytes);
+                else acc.addExecution(totalBytes / count); // Approximate avg for remaining
+            }
+            
+            shardStats.put(collectionKey, acc);
+        }
+        
+        fullShardStats.put(shardId, shardStats);
+    }
+    
+    private void updateShardWorkloadsFromFullStats() {
+        // Replace sample-based shard workloads with full stats
+        shardWorkloads.clear();
+        
+        for (Map.Entry<String, Map<String, EntryAccumulator>> shardEntry : fullShardStats.entrySet()) {
+            String shardId = shardEntry.getKey();
+            Map<String, EntryAccumulator> shardStats = shardEntry.getValue();
+            
+            long totalOps = shardStats.values().stream().mapToLong(EntryAccumulator::getCount).sum();
+            long totalBytes = shardStats.values().stream().mapToLong(EntryAccumulator::getTotal).sum();
+            
+            ShardWorkload workload = new ShardWorkload();
+            workload.shardId = shardId;
+            workload.totalOps = totalOps;
+            workload.totalBytes = totalBytes;
+            workload.avgBytesPerOp = totalOps > 0 ? (double) totalBytes / totalOps : 0;
+            
+            shardWorkloads.put(shardId, workload);
         }
     }
 }
