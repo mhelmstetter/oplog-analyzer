@@ -121,6 +121,7 @@ public class TailCommand implements Callable<Integer> {
     private volatile int shutdownAttempts = 0;
     private volatile long lastShutdownAttempt = 0;
     private static final long SHUTDOWN_RESET_INTERVAL = 5000; // Reset counter after 5 seconds
+    private volatile boolean reportGenerated = false;
     
     static class IdStatistics {
         long count = 0;
@@ -616,10 +617,16 @@ public class TailCommand implements Callable<Integer> {
         // If we have multi-threaded execution, stop workers and merge results
         if (workers != null && !workers.isEmpty()) {
             stopWorkers();
-            mergeShardResults();
+            if (!resultsAlreadyMerged) {
+                mergeShardResults();
+            }
         }
         
-        report();
+        // Only report if we haven't already reported
+        if (!reportGenerated) {
+            report();
+            reportGenerated = true;
+        }
     }
     
     private void forceShutdown() {
@@ -645,7 +652,10 @@ public class TailCommand implements Callable<Integer> {
                 if (!resultsAlreadyMerged && shardAccumulators != null) {
                     mergeShardResults();
                 }
-                report();
+                if (!reportGenerated) {
+                    report();
+                    reportGenerated = true;
+                }
                 
             } catch (Exception e) {
                 System.err.println("Error during forced shutdown: " + e.getMessage());
