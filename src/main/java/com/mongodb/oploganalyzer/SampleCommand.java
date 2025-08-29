@@ -318,6 +318,7 @@ public class SampleCommand extends BaseOplogCommand {
             
             if (compress && gzipOutputStream != null) {
                 gzipOutputStream.write(bytes);
+                gzipOutputStream.flush(); // Ensure data is written
             } else if (channel != null) {
                 ByteBuffer buffer = ByteBuffer.wrap(bytes);
                 channel.write(buffer);
