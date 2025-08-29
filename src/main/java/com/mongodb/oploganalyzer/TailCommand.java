@@ -117,6 +117,11 @@ public class TailCommand implements Callable<Integer> {
     private volatile long largestDocSize = 0;
     private volatile String largestDocNamespace = "";
     
+    // Shutdown handling
+    private volatile int shutdownAttempts = 0;
+    private volatile long lastShutdownAttempt = 0;
+    private static final long SHUTDOWN_RESET_INTERVAL = 5000; // Reset counter after 5 seconds
+    
     static class IdStatistics {
         long count = 0;
         // Document sizes
@@ -565,22 +570,97 @@ public class TailCommand implements Callable<Integer> {
     
     private void setupShutdownHook() {
         if (limit == null) {
+            // First, add a regular shutdown hook for the initial Ctrl-C
             Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
                 public void run() {
-                    System.out.println();
-                    System.out.println("**** SHUTDOWN *****");
-                    stop();
-                    
-                    // If we have multi-threaded execution, stop workers and merge results
-                    if (workers != null && !workers.isEmpty()) {
-                        stopWorkers();
-                        mergeShardResults();
-                    }
-                    
-                    report();
+                    handleShutdown();
                 }
             }));
+            
+            // Also register a signal handler to track multiple Ctrl-C attempts
+            try {
+                sun.misc.Signal.handle(new sun.misc.Signal("INT"), signal -> {
+                    long now = System.currentTimeMillis();
+                    
+                    // Reset counter if it's been more than 5 seconds since last attempt
+                    if (now - lastShutdownAttempt > SHUTDOWN_RESET_INTERVAL) {
+                        shutdownAttempts = 0;
+                    }
+                    
+                    shutdownAttempts++;
+                    lastShutdownAttempt = now;
+                    
+                    if (shutdownAttempts == 1) {
+                        System.out.println("\n>>> Graceful shutdown initiated... (press Ctrl-C again to force quit)");
+                        // First attempt - graceful shutdown will be handled by shutdown hook
+                    } else if (shutdownAttempts == 2) {
+                        System.out.println("\n>>> Forcing shutdown... (press Ctrl-C once more for immediate termination)");
+                        forceShutdown();
+                    } else if (shutdownAttempts >= 3) {
+                        System.err.println("\n>>> IMMEDIATE TERMINATION!");
+                        Runtime.getRuntime().halt(1);
+                    }
+                });
+            } catch (IllegalArgumentException e) {
+                // Signal handling not supported on this platform
+                logger.debug("Signal handling not available: {}", e.getMessage());
+            }
         }
+    }
+    
+    private void handleShutdown() {
+        System.out.println();
+        System.out.println("**** SHUTDOWN *****");
+        stop();
+        
+        // If we have multi-threaded execution, stop workers and merge results
+        if (workers != null && !workers.isEmpty()) {
+            stopWorkers();
+            mergeShardResults();
+        }
+        
+        report();
+    }
+    
+    private void forceShutdown() {
+        // More aggressive shutdown - shorter timeouts
+        Thread forcedShutdown = new Thread(() -> {
+            try {
+                System.out.println("Forcing worker termination...");
+                
+                // Give workers only 2 seconds to stop gracefully
+                if (currentExecutor != null) {
+                    currentExecutor.shutdownNow();
+                    if (!currentExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+                        System.err.println("Workers did not terminate in time!");
+                    }
+                }
+                
+                // Stop memory monitoring immediately
+                if (memoryMonitor != null) {
+                    memoryMonitor.shutdownNow();
+                }
+                
+                // Try to generate a quick report with whatever data we have
+                if (!resultsAlreadyMerged && shardAccumulators != null) {
+                    mergeShardResults();
+                }
+                report();
+                
+            } catch (Exception e) {
+                System.err.println("Error during forced shutdown: " + e.getMessage());
+            } finally {
+                // Exit after maximum 3 seconds
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    // Ignore
+                }
+                System.exit(1);
+            }
+        });
+        forcedShutdown.setDaemon(true);
+        forcedShutdown.start();
     }
     
     private void initializeClient() {
@@ -689,20 +769,29 @@ public class TailCommand implements Callable<Integer> {
     }
     
     private void stopWorkers() {
-        logger.debug("Stopping {} workers gracefully", workers.size());
+        stopWorkers(5);  // Default 5 second timeout
+    }
+    
+    private void stopWorkers(int timeoutSeconds) {
+        logger.debug("Stopping {} workers with {}s timeout", workers.size(), timeoutSeconds);
         for (ShardTailWorker worker : workers) {
             worker.stop();
         }
         
         currentExecutor.shutdown();
         try {
-            if (!currentExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                logger.debug("Workers didn't terminate gracefully, forcing shutdown");
+            if (!currentExecutor.awaitTermination(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)) {
+                logger.warn("Workers did not terminate within {}s timeout, forcing shutdown", timeoutSeconds);
                 currentExecutor.shutdownNow();
+                // Give it one more second after shutdownNow
+                if (!currentExecutor.awaitTermination(1, java.util.concurrent.TimeUnit.SECONDS)) {
+                    logger.error("Workers still running after forced shutdown!");
+                }
             }
         } catch (InterruptedException e) {
-            logger.debug("Interrupted while waiting for workers to stop");
+            logger.warn("Interrupted while waiting for workers to stop");
             currentExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
         }
         
         logger.debug("All workers stopped");
