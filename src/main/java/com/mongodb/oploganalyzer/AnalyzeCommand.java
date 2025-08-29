@@ -145,6 +145,12 @@ public class AnalyzeCommand implements Callable<Integer> {
             }
             
             generateAnalysisReport();
+            
+            // Print full shard statistics if loaded from stats file
+            if (!fullShardStats.isEmpty()) {
+                printFullShardStatistics();
+            }
+            
             return 0;
             
         } catch (Exception e) {
@@ -833,6 +839,37 @@ public class AnalyzeCommand implements Callable<Integer> {
             workload.avgBytesPerOp = totalOps > 0 ? (double) totalBytes / totalOps : 0;
             
             shardWorkloads.put(shardId, workload);
+        }
+    }
+    
+    private void printFullShardStatistics() {
+        System.out.println();
+        System.out.println("================================================================================");
+        System.out.println("FULL SHARD STATISTICS (from stats report)");
+        System.out.println("================================================================================");
+        
+        // Sort shards by name for consistent output
+        List<String> sortedShards = fullShardStats.keySet().stream().sorted().collect(Collectors.toList());
+        
+        for (String shardId : sortedShards) {
+            Map<String, EntryAccumulator> shardAccumulatorMap = fullShardStats.get(shardId);
+            if (shardAccumulatorMap != null && !shardAccumulatorMap.isEmpty()) {
+                System.out.println();
+                System.out.println(String.format("--- %s ---", shardId));
+                System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", "Namespace", "op", "count", "min", "max",
+                        "avg", "total (size)"));
+                
+                // Sort by operation count descending
+                shardAccumulatorMap.values().stream()
+                    .sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
+                    .forEach(acc -> System.out.println(acc));
+                
+                // Summary for this shard
+                long totalOps = shardAccumulatorMap.values().stream().mapToLong(EntryAccumulator::getCount).sum();
+                long totalBytes = shardAccumulatorMap.values().stream().mapToLong(EntryAccumulator::getTotal).sum();
+                System.out.println(String.format("Shard %s total: %,d operations, %s", 
+                    shardId, totalOps, org.apache.commons.io.FileUtils.byteCountToDisplaySize(totalBytes)));
+            }
         }
     }
 }
