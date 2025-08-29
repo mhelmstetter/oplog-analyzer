@@ -93,6 +93,9 @@ public class TailCommand implements Callable<Integer> {
     @Option(names = {"--shardIndex"}, description = "Comma-separated list of shard indices to analyze (0,1,2...), default: all shards")
     private String shardIndexes;
     
+    @Option(names = {"--shardStats"}, description = "Show per-shard breakdown of statistics in the report")
+    private boolean shardStats = false;
+    
     private ShardClient shardClient;
     private boolean shutdown = false;
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new ConcurrentHashMap<OplogEntryKey, EntryAccumulator>();
@@ -105,6 +108,9 @@ public class TailCommand implements Callable<Integer> {
     private List<ShardTailWorker> workers = new java.util.ArrayList<>();
     private List<Map<OplogEntryKey, EntryAccumulator>> shardAccumulators = null;
     private volatile boolean resultsAlreadyMerged = false;
+    
+    // Per-shard statistics (when shardStats flag is enabled)
+    private Map<String, Map<OplogEntryKey, EntryAccumulator>> perShardStats = null;
     
     // Memory monitoring
     private ScheduledExecutorService memoryMonitor = null;
@@ -211,6 +217,21 @@ public class TailCommand implements Callable<Integer> {
         
         public int getPendingUpdatesCount() {
             return pendingUpdates.size();
+        }
+        
+        private void trackPerShardStats(String ns, String opType, long docSize) {
+            if (shardStats && perShardStats != null) {
+                Map<OplogEntryKey, EntryAccumulator> shardMap = perShardStats.get(shardId);
+                if (shardMap != null) {
+                    OplogEntryKey key = new OplogEntryKey(ns, opType);
+                    EntryAccumulator accum = shardMap.get(key);
+                    if (accum == null) {
+                        accum = new EntryAccumulator(key);
+                        shardMap.put(key, accum);
+                    }
+                    accum.addExecution(docSize);
+                }
+            }
         }
         
         @Override
@@ -335,6 +356,9 @@ public class TailCommand implements Callable<Integer> {
             }
             accum.addExecution(oplogSize);
             
+            // Track per-shard stats if enabled
+            trackPerShardStats(ns, opType, oplogSize);
+            
             // Check main threshold for debug reporting (using oplog size - not ideal but fast)
             if (oplogSize >= threshold) {
                 logThresholdExceeded(shardId, ns, opType, oplogSize, doc);
@@ -421,7 +445,11 @@ public class TailCommand implements Callable<Integer> {
                                                 targetAccumulators.put(innerKey, innerAccum);
                                             }
                                             // Use a portion of the total doc size for each nested op
-                                            innerAccum.addExecution(docSize / applyOps.size());
+                                            long innerDocSize = docSize / applyOps.size();
+                                            innerAccum.addExecution(innerDocSize);
+                                            
+                                            // Track per-shard stats if enabled
+                                            trackPerShardStats(innerNs, innerOpType, innerDocSize);
                                         }
                                     }
                                 }
@@ -460,6 +488,9 @@ public class TailCommand implements Callable<Integer> {
                                 targetAccumulators.put(key, accum);
                             }
                             accum.addExecution(docSize);
+                            
+                            // Track per-shard stats if enabled
+                            trackPerShardStats(ns, opType, docSize);
                             
                             // Get the _id for both debug and statistics purposes
                             BsonDocument o = (BsonDocument) doc.get("o");
@@ -748,6 +779,11 @@ public class TailCommand implements Callable<Integer> {
         workers = new java.util.ArrayList<>();
         shardAccumulators = new java.util.ArrayList<>();
         
+        // Initialize per-shard stats if requested
+        if (shardStats) {
+            perShardStats = new ConcurrentHashMap<>();
+        }
+        
         // Create and start workers for each shard
         for (String shardId : targetShards) {
             MongoClient mongoClient = shardClients.get(shardId);
@@ -755,6 +791,11 @@ public class TailCommand implements Callable<Integer> {
             // Create separate accumulator for this shard - no contention!
             Map<OplogEntryKey, EntryAccumulator> shardAccumulator = new HashMap<>();
             shardAccumulators.add(shardAccumulator);
+            
+            // Initialize per-shard stats tracking
+            if (shardStats) {
+                perShardStats.put(shardId, new ConcurrentHashMap<>());
+            }
             
             ShardTailWorker worker = new ShardTailWorker(shardId, mongoClient, shardAccumulator);
             workers.add(worker);
@@ -1209,6 +1250,39 @@ public class TailCommand implements Callable<Integer> {
         
         if (idStats && !idStatsCache.asMap().isEmpty()) {
             printIdStatistics();
+        }
+        
+        if (shardStats && perShardStats != null && !perShardStats.isEmpty()) {
+            printPerShardStatistics();
+        }
+    }
+    
+    private void printPerShardStatistics() {
+        System.out.println();
+        System.out.println("=== PER-SHARD BREAKDOWN ===");
+        
+        // Sort shards by name for consistent output
+        List<String> sortedShards = perShardStats.keySet().stream().sorted().collect(Collectors.toList());
+        
+        for (String shardId : sortedShards) {
+            Map<OplogEntryKey, EntryAccumulator> shardAccumulatorMap = perShardStats.get(shardId);
+            if (shardAccumulatorMap != null && !shardAccumulatorMap.isEmpty()) {
+                System.out.println();
+                System.out.println(String.format("--- %s ---", shardId));
+                System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", "Namespace", "op", "count", "min", "max",
+                        "avg", "total (size)"));
+                
+                // Sort by operation count descending
+                shardAccumulatorMap.values().stream()
+                    .sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
+                    .forEach(acc -> System.out.println(acc));
+                
+                // Summary for this shard
+                long totalOps = shardAccumulatorMap.values().stream().mapToLong(EntryAccumulator::getCount).sum();
+                long totalBytes = shardAccumulatorMap.values().stream().mapToLong(EntryAccumulator::getTotal).sum();
+                System.out.println(String.format("Shard %s total: %,d operations, %s", 
+                    shardId, totalOps, org.apache.commons.io.FileUtils.byteCountToDisplaySize(totalBytes)));
+            }
         }
     }
     
