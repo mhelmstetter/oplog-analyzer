@@ -314,13 +314,14 @@ public class SampleCommand extends BaseOplogCommand {
     
     private synchronized void writeSample(RawBsonDocument doc) {
         try {
-            byte[] bytes = doc.getByteBuffer().array();
-            
             if (compress && gzipOutputStream != null) {
+                ByteBuffer buffer = doc.getByteBuffer().asNIO();
+                byte[] bytes = new byte[buffer.remaining()];
+                buffer.get(bytes);
                 gzipOutputStream.write(bytes);
-                gzipOutputStream.flush(); // Ensure data is written
+                gzipOutputStream.flush();
             } else if (channel != null) {
-                ByteBuffer buffer = ByteBuffer.wrap(bytes);
+                ByteBuffer buffer = doc.getByteBuffer().asNIO();
                 channel.write(buffer);
             }
         } catch (Exception e) {
