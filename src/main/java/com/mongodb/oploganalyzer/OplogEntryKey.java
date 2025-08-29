@@ -41,6 +41,9 @@ public class OplogEntryKey {
         return true;
     }
     
-    
+    @Override
+    public String toString() {
+        return ns + "::" + op;
+    }
 
 }
