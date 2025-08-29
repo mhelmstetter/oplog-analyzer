@@ -627,77 +627,64 @@ public class AnalyzeCommand implements Callable<Integer> {
     }
     
     private void analyzeIdAcrossShards(String namespace) {
-        // Collect all IDs for this namespace across all shards
-        Map<String, Map<String, UpdateStats>> idToShardStats = new HashMap<>(); // id -> shard -> stats
+        // Show per-shard activity for this namespace
+        System.out.println("\n  🔍 Per-shard activity comparison:");
+        
+        // Collect stats for this namespace across all shards
+        Map<String, NamespaceShardStats> shardStats = new HashMap<>();
         
         for (Map.Entry<String, Map<String, Map<String, UpdateStats>>> shardEntry : shardIdUpdateFrequency.entrySet()) {
             String shardId = shardEntry.getKey();
             Map<String, UpdateStats> nsStats = shardEntry.getValue().get(namespace);
+            
             if (nsStats != null) {
-                for (Map.Entry<String, UpdateStats> idEntry : nsStats.entrySet()) {
-                    String id = idEntry.getKey();
-                    UpdateStats stats = idEntry.getValue();
-                    idToShardStats.computeIfAbsent(id, k -> new HashMap<>()).put(shardId, stats);
-                }
+                // Calculate totals for this shard+namespace
+                int totalOps = nsStats.values().stream().mapToInt(s -> s.count).sum();
+                long totalBytes = nsStats.values().stream().mapToLong(s -> s.totalSize).sum();
+                int uniqueIds = nsStats.size();
+                
+                shardStats.put(shardId, new NamespaceShardStats(totalOps, totalBytes, uniqueIds));
             }
         }
         
-        if (idToShardStats.isEmpty()) return;
-        
-        // Find IDs that show significant shard imbalances
-        System.out.println("\n  🔍 Cross-shard ID patterns:");
-        
-        for (Map.Entry<String, Map<String, UpdateStats>> idEntry : idToShardStats.entrySet()) {
-            String id = idEntry.getKey();
-            Map<String, UpdateStats> shardStats = idEntry.getValue();
-            
-            // Skip IDs that only appear on one shard
-            if (shardStats.size() < 2) continue;
-            
-            // Calculate statistics across shards for this ID
-            int totalUpdatesForId = shardStats.values().stream().mapToInt(s -> s.count).sum();
-            double avgUpdatesPerShard = (double) totalUpdatesForId / shardStats.size();
-            
-            int maxShardUpdates = shardStats.values().stream().mapToInt(s -> s.count).max().orElse(0);
-            int minShardUpdates = shardStats.values().stream().mapToInt(s -> s.count).min().orElse(0);
-            
-            // Check for significant imbalance (>2x difference or >50% of updates on one shard)
-            boolean hasImbalance = maxShardUpdates > minShardUpdates * 2 || 
-                                 maxShardUpdates > totalUpdatesForId * 0.5;
-            
-            if (hasImbalance && totalUpdatesForId >= 10) { // Only show if meaningful number of updates
-                System.out.printf("    ID %s (%d total updates across %d shards):%n", 
-                    id, totalUpdatesForId, shardStats.size());
-                
-                // Show per-shard breakdown sorted by update count
-                shardStats.entrySet().stream()
-                    .sorted(Map.Entry.<String, UpdateStats>comparingByValue(
-                        Comparator.comparingInt((UpdateStats s) -> s.count)).reversed())
-                    .forEach(entry -> {
-                        String shardId = entry.getKey();
-                        UpdateStats stats = entry.getValue();
-                        double percentage = (double) stats.count / totalUpdatesForId * 100;
-                        System.out.printf("      %s: %d updates (%.1f%%), %.1f KB avg%n", 
-                            shardId, stats.count, percentage, stats.getAvgSize() / 1024);
-                    });
-                
-                // Highlight the imbalance
-                if (maxShardUpdates > totalUpdatesForId * 0.7) {
-                    System.out.println("      🔴 SEVERE: One shard handles >70% of updates for this ID");
-                } else if (maxShardUpdates > totalUpdatesForId * 0.5) {
-                    System.out.println("      🟡 MODERATE: One shard handles >50% of updates for this ID");
-                }
-                System.out.println();
-            }
+        if (shardStats.isEmpty()) {
+            System.out.println("    No activity found for this namespace");
+            return;
         }
         
-        // Summary of cross-shard ID distribution
-        long totalCrossShardIds = idToShardStats.entrySet().stream()
-            .filter(e -> e.getValue().size() > 1)
-            .count();
+        // Calculate cluster averages for this namespace
+        int totalOpsCluster = shardStats.values().stream().mapToInt(s -> s.totalOps).sum();
+        long totalBytesCluster = shardStats.values().stream().mapToLong(s -> s.totalBytes).sum();
+        double avgOpsPerShard = (double) totalOpsCluster / shardStats.size();
+        double avgBytesPerOp = totalOpsCluster > 0 ? (double) totalBytesCluster / totalOpsCluster : 0;
         
-        if (totalCrossShardIds > 0) {
-            System.out.printf("  📈 Found %d IDs appearing across multiple shards%n", totalCrossShardIds);
+        // Show per-shard breakdown
+        shardStats.entrySet().stream()
+            .sorted(Map.Entry.<String, NamespaceShardStats>comparingByValue((s1, s2) -> 
+                Long.compare(s2.totalBytes, s1.totalBytes)))
+            .forEach(entry -> {
+                String shardId = entry.getKey();
+                NamespaceShardStats stats = entry.getValue();
+                
+                double opDeviation = avgOpsPerShard > 0 ? (stats.totalOps - avgOpsPerShard) / avgOpsPerShard * 100 : 0;
+                double avgSizePerOp = stats.totalOps > 0 ? (double) stats.totalBytes / stats.totalOps : 0;
+                double sizeDeviation = avgBytesPerOp > 0 ? (avgSizePerOp - avgBytesPerOp) / avgBytesPerOp * 100 : 0;
+                
+                System.out.printf("    %s: %,d ops (%+.0f%%), %.1f KB/op (%+.0f%%), %,d unique IDs%n",
+                    shardId, stats.totalOps, opDeviation, avgSizePerOp / 1024, sizeDeviation, stats.uniqueIds);
+            });
+    }
+    
+    // Helper class for per-shard namespace statistics
+    private static class NamespaceShardStats {
+        final int totalOps;
+        final long totalBytes;
+        final int uniqueIds;
+        
+        NamespaceShardStats(int totalOps, long totalBytes, int uniqueIds) {
+            this.totalOps = totalOps;
+            this.totalBytes = totalBytes;
+            this.uniqueIds = uniqueIds;
         }
     }
 }
