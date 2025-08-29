@@ -51,7 +51,25 @@ public class AnalyzeCommand implements Callable<Integer> {
     private final Map<String, ShardWorkload> shardWorkloads = new HashMap<>();
     private final Map<String, ShardKeyInfo> shardKeys = new HashMap<>();
     private final Map<String, CollectionPattern> collectionPatterns = new HashMap<>();
-    private final Map<String, Map<String, Integer>> idUpdateFrequency = new HashMap<>(); // namespace -> id -> count
+    private final Map<String, Map<String, UpdateStats>> idUpdateFrequency = new HashMap<>(); // namespace -> id -> stats
+    
+    static class UpdateStats {
+        int count = 0;
+        long totalSize = 0;
+        long minSize = Long.MAX_VALUE;
+        long maxSize = Long.MIN_VALUE;
+        
+        void addUpdate(long size) {
+            count++;
+            totalSize += size;
+            minSize = Math.min(minSize, size);
+            maxSize = Math.max(maxSize, size);
+        }
+        
+        double getAvgSize() {
+            return count > 0 ? (double) totalSize / count : 0;
+        }
+    }
     
     static class ShardWorkload {
         String shardId;
@@ -301,13 +319,14 @@ public class AnalyzeCommand implements Callable<Integer> {
             pattern.opTypeCounts.merge(opType, 1L, Long::sum);
             pattern.totalSize += docSize;
             
-            // Track ID update frequency for updates
+            // Track ID update frequency and size for updates
             if ("u".equals(opType)) {
                 BsonValue id = extractDocumentId(doc);
                 if (id != null) {
                     String idString = formatIdForFrequency(id);
                     idUpdateFrequency.computeIfAbsent(namespace, k -> new HashMap<>())
-                        .merge(idString, 1, Integer::sum);
+                        .computeIfAbsent(idString, k -> new UpdateStats())
+                        .addUpdate(docSize);
                 }
             }
             
@@ -511,20 +530,18 @@ public class AnalyzeCommand implements Callable<Integer> {
     private String formatIdForFrequency(BsonValue id) {
         if (id == null) return "null";
         
-        // Simplified ID representation for frequency tracking
+        // Full ID representation without truncation
         switch (id.getBsonType()) {
             case OBJECT_ID:
                 return id.asObjectId().getValue().toHexString();
             case STRING:
-                String str = id.asString().getValue();
-                return str.length() > 20 ? str.substring(0, 20) + "..." : str;
+                return id.asString().getValue();
             case INT32:
                 return String.valueOf(id.asInt32().getValue());
             case INT64:
                 return String.valueOf(id.asInt64().getValue());
             default:
-                String repr = id.toString();
-                return repr.length() > 20 ? repr.substring(0, 20) + "..." : repr;
+                return id.toString();
         }
     }
     
@@ -571,33 +588,62 @@ public class AnalyzeCommand implements Callable<Integer> {
         
         System.out.println("\n--- ID UPDATE FREQUENCY ANALYSIS ---");
         
-        for (Map.Entry<String, Map<String, Integer>> nsEntry : idUpdateFrequency.entrySet()) {
+        for (Map.Entry<String, Map<String, UpdateStats>> nsEntry : idUpdateFrequency.entrySet()) {
             String namespace = nsEntry.getKey();
-            Map<String, Integer> idCounts = nsEntry.getValue();
+            Map<String, UpdateStats> idStats = nsEntry.getValue();
             
-            if (idCounts.isEmpty()) continue;
+            if (idStats.isEmpty()) continue;
             
             // Calculate frequency statistics
-            int totalUpdates = idCounts.values().stream().mapToInt(Integer::intValue).sum();
-            double avgUpdatesPerID = (double) totalUpdates / idCounts.size();
-            int maxUpdates = idCounts.values().stream().mapToInt(Integer::intValue).max().orElse(0);
-            int minUpdates = idCounts.values().stream().mapToInt(Integer::intValue).min().orElse(0);
+            int totalUpdates = idStats.values().stream().mapToInt(s -> s.count).sum();
+            double avgUpdatesPerID = (double) totalUpdates / idStats.size();
+            int maxUpdates = idStats.values().stream().mapToInt(s -> s.count).max().orElse(0);
+            int minUpdates = idStats.values().stream().mapToInt(s -> s.count).min().orElse(0);
+            
+            // Calculate size statistics
+            long totalUpdateBytes = idStats.values().stream().mapToLong(s -> s.totalSize).sum();
+            double avgSizePerUpdate = totalUpdates > 0 ? (double) totalUpdateBytes / totalUpdates : 0;
             
             System.out.printf("\n📊 %s update patterns:%n", namespace);
-            System.out.printf("  Total updates: %,d across %,d unique IDs%n", totalUpdates, idCounts.size());
+            System.out.printf("  Total updates: %,d across %,d unique IDs%n", totalUpdates, idStats.size());
             System.out.printf("  Frequency range: %d-%d updates/ID (avg: %.1f)%n", minUpdates, maxUpdates, avgUpdatesPerID);
+            System.out.printf("  Update size: %.1f KB average (%s total)%n", 
+                avgSizePerUpdate / 1024, org.apache.commons.io.FileUtils.byteCountToDisplaySize(totalUpdateBytes));
             
             // Show hot IDs (frequently updated)
-            List<Map.Entry<String, Integer>> hotIds = idCounts.entrySet().stream()
-                .filter(e -> e.getValue() > avgUpdatesPerID * 2) // More than 2x average
-                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+            List<Map.Entry<String, UpdateStats>> hotIds = idStats.entrySet().stream()
+                .filter(e -> e.getValue().count > avgUpdatesPerID * 2) // More than 2x average
+                .sorted(Map.Entry.<String, UpdateStats>comparingByValue(
+                    Comparator.comparingInt((UpdateStats s) -> s.count)).reversed())
                 .limit(10)
                 .collect(Collectors.toList());
             
             if (!hotIds.isEmpty()) {
                 System.out.println("  🔥 Hot IDs (frequent updates):");
-                hotIds.forEach(entry -> 
-                    System.out.printf("    %s: %d updates%n", entry.getKey(), entry.getValue()));
+                hotIds.forEach(entry -> {
+                    UpdateStats stats = entry.getValue();
+                    System.out.printf("    %s: %d updates, %.1f KB avg, %s total%n", 
+                        entry.getKey(), stats.count, stats.getAvgSize() / 1024,
+                        org.apache.commons.io.FileUtils.byteCountToDisplaySize(stats.totalSize));
+                });
+            }
+            
+            // Show large update IDs
+            List<Map.Entry<String, UpdateStats>> largeUpdateIds = idStats.entrySet().stream()
+                .filter(e -> e.getValue().getAvgSize() > avgSizePerUpdate * 2)
+                .sorted(Map.Entry.<String, UpdateStats>comparingByValue(
+                    Comparator.comparingDouble((UpdateStats s) -> s.getAvgSize())).reversed())
+                .limit(5)
+                .collect(Collectors.toList());
+            
+            if (!largeUpdateIds.isEmpty()) {
+                System.out.println("  📏 Large update IDs:");
+                largeUpdateIds.forEach(entry -> {
+                    UpdateStats stats = entry.getValue();
+                    System.out.printf("    %s: %.1f KB avg (%d-%d KB range)%n",
+                        entry.getKey(), stats.getAvgSize() / 1024, 
+                        stats.minSize / 1024, stats.maxSize / 1024);
+                });
             }
             
             // Warn about potential hotspots
