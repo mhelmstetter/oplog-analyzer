@@ -127,52 +127,88 @@ public class AnalyzeCommand implements Callable<Integer> {
     }
     
     private void analyzeFile(String fileName) throws IOException {
-        InputStream inputStream = new FileInputStream(fileName);
-        
-        // Handle gzipped files
-        if (fileName.endsWith(".gz")) {
-            inputStream = new GZIPInputStream(inputStream);
+        File file = new File(fileName);
+        if (!file.exists()) {
+            throw new IOException("File not found: " + fileName);
         }
         
-        inputStream = new BufferedInputStream(inputStream);
-        
-        try {
-            while (true) {
-                RawBsonDocument doc = readNextDocument(inputStream);
-                if (doc == null) break;
-                
-                processDocument(doc);
-            }
-        } finally {
-            inputStream.close();
+        try (InputStream inputStream = createInputStream(file)) {
+            processBsonStream(inputStream, fileName);
         }
     }
     
-    private RawBsonDocument readNextDocument(InputStream inputStream) throws IOException {
-        // Read BSON document length (first 4 bytes)
-        byte[] lengthBytes = new byte[4];
-        int bytesRead = inputStream.read(lengthBytes);
-        if (bytesRead != 4) return null; // EOF
+    private InputStream createInputStream(File file) throws IOException {
+        FileInputStream fis = new FileInputStream(file);
+        BufferedInputStream bis = new BufferedInputStream(fis, 65536);
         
-        int length = ByteBuffer.wrap(lengthBytes).order(ByteOrder.LITTLE_ENDIAN).getInt();
-        if (length < 5 || length > 16 * 1024 * 1024) { // Basic sanity check
-            throw new IOException("Invalid BSON document length: " + length);
+        if (file.getName().endsWith(".gz")) {
+            return new GZIPInputStream(bis, 65536);
+        } else {
+            return bis;
+        }
+    }
+    
+    private void processBsonStream(InputStream inputStream, String sourceName) throws IOException {
+        byte[] sizeBytes = new byte[4];
+        long count = 0;
+        
+        while (true) {
+            // Read document size (first 4 bytes)
+            int bytesRead = readFully(inputStream, sizeBytes);
+            if (bytesRead < 4) {
+                break; // End of file
+            }
+            
+            // Parse document size (little-endian)
+            ByteBuffer sizeBuf = ByteBuffer.wrap(sizeBytes).order(ByteOrder.LITTLE_ENDIAN);
+            int docSize = sizeBuf.getInt();
+            
+            if (docSize < 5 || docSize > 16 * 1024 * 1024) {
+                logger.warn("Invalid document size: {} at position {}", docSize, count);
+                break;
+            }
+            
+            // Read the rest of the document
+            byte[] docBytes = new byte[docSize];
+            System.arraycopy(sizeBytes, 0, docBytes, 0, 4);
+            
+            bytesRead = readFully(inputStream, docBytes, 4, docSize - 4);
+            if (bytesRead < docSize - 4) {
+                logger.warn("Incomplete document at position {}", count);
+                break;
+            }
+            
+            // Parse and process the document
+            try {
+                RawBsonDocument doc = new RawBsonDocument(docBytes);
+                processDocument(doc);
+                count++;
+                
+                if (count % 1000 == 0) {
+                    System.out.printf("Processed %,d documents...%n", count);
+                }
+            } catch (Exception e) {
+                logger.warn("Error processing document at position {}: {}", count, e.getMessage());
+            }
         }
         
-        // Read the rest of the document
-        byte[] docBytes = new byte[length];
-        System.arraycopy(lengthBytes, 0, docBytes, 0, 4);
-        
-        int remaining = length - 4;
-        int offset = 4;
-        while (remaining > 0) {
-            int read = inputStream.read(docBytes, offset, remaining);
-            if (read == -1) throw new IOException("Unexpected EOF while reading BSON document");
-            offset += read;
-            remaining -= read;
+        System.out.printf("Total processed from %s: %,d documents%n", sourceName, count);
+    }
+    
+    private int readFully(InputStream input, byte[] buffer) throws IOException {
+        return readFully(input, buffer, 0, buffer.length);
+    }
+    
+    private int readFully(InputStream input, byte[] buffer, int offset, int length) throws IOException {
+        int totalRead = 0;
+        while (totalRead < length) {
+            int read = input.read(buffer, offset + totalRead, length - totalRead);
+            if (read == -1) {
+                break;
+            }
+            totalRead += read;
         }
-        
-        return new RawBsonDocument(docBytes);
+        return totalRead;
     }
     
     private void processDocument(RawBsonDocument doc) {
