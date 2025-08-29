@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 
 import org.bson.BsonDocument;
@@ -50,6 +51,7 @@ public class AnalyzeCommand implements Callable<Integer> {
     private final Map<String, ShardWorkload> shardWorkloads = new HashMap<>();
     private final Map<String, ShardKeyInfo> shardKeys = new HashMap<>();
     private final Map<String, CollectionPattern> collectionPatterns = new HashMap<>();
+    private final Map<String, Map<String, Integer>> idUpdateFrequency = new HashMap<>(); // namespace -> id -> count
     
     static class ShardWorkload {
         String shardId;
@@ -266,8 +268,7 @@ public class AnalyzeCommand implements Callable<Integer> {
             long docSize = doc.getByteBuffer().remaining();
             
             // Extract shard information from the document context
-            // For now, we'll infer shard from file name or use "unknown"
-            String shardId = "unknown"; // TODO: Extract from file name or document context
+            String shardId = extractShardId(doc);
             
             // Update shard workload
             ShardWorkload workload = shardWorkloads.computeIfAbsent(shardId, k -> {
@@ -299,7 +300,16 @@ public class AnalyzeCommand implements Callable<Integer> {
             
             pattern.opTypeCounts.merge(opType, 1L, Long::sum);
             pattern.totalSize += docSize;
-            // avgSize will be calculated later
+            
+            // Track ID update frequency for updates
+            if ("u".equals(opType)) {
+                BsonValue id = extractDocumentId(doc);
+                if (id != null) {
+                    String idString = formatIdForFrequency(id);
+                    idUpdateFrequency.computeIfAbsent(namespace, k -> new HashMap<>())
+                        .merge(idString, 1, Integer::sum);
+                }
+            }
             
         } catch (Exception e) {
             logger.debug("Error processing oplog entry: {}", e.getMessage());
@@ -320,6 +330,8 @@ public class AnalyzeCommand implements Callable<Integer> {
         }
         
         printCollectionPatterns();
+        printPerShardComparison();
+        printIdUpdateFrequency();
         printRecommendations();
     }
     
@@ -327,18 +339,8 @@ public class AnalyzeCommand implements Callable<Integer> {
         System.out.println("\n--- SHARD KEY ANALYSIS ---");
         
         for (ShardKeyInfo info : shardKeys.values()) {
-            System.out.printf("Collection: %s%n", info.namespace);
-            System.out.printf("  Shard Key: %s%n", info.keyFields);
-            System.out.printf("  Hashed: %s%n", info.isHashed ? "Yes" : "No");
-            
-            // Analyze potential issues
-            if (info.keyFields.contains("_id") && !info.isHashed) {
-                System.out.println("  ⚠️  WARNING: _id shard key without hashing may cause hotspots");
-            }
-            if (info.keyFields.split(",").length == 1) {
-                System.out.println("  ⚠️  WARNING: Single-field shard key may not distribute evenly");
-            }
-            System.out.println();
+            String hashedStr = info.isHashed ? "hashed" : "unhashed";
+            System.out.printf("%s: %s (%s)%n", info.namespace, info.keyFields, hashedStr);
         }
     }
     
@@ -472,4 +474,137 @@ public class AnalyzeCommand implements Callable<Integer> {
         }
     }
     
+    private String extractShardId(RawBsonDocument doc) {
+        // Try to extract shard ID from oplog entry metadata
+        try {
+            // Look for shard ID in the document (sometimes present in replication metadata)
+            BsonValue shardValue = doc.get("shard");
+            if (shardValue instanceof BsonString) {
+                return shardValue.asString().getValue();
+            }
+            
+            // If not found, try to infer from wall clock or other metadata
+            // For now, use "unknown" but this could be enhanced
+            return "unknown";
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+    
+    private BsonValue extractDocumentId(RawBsonDocument doc) {
+        try {
+            String opType = doc.getString("op").getValue();
+            if ("u".equals(opType)) {
+                // For updates, _id is in o2 field
+                BsonDocument o2 = doc.getDocument("o2");
+                return o2 != null ? o2.get("_id") : null;
+            } else {
+                // For inserts and deletes, _id is in o field
+                BsonDocument o = doc.getDocument("o");
+                return o != null ? o.get("_id") : null;
+            }
+        } catch (Exception e) {
+            return null;
+        }
+    }
+    
+    private String formatIdForFrequency(BsonValue id) {
+        if (id == null) return "null";
+        
+        // Simplified ID representation for frequency tracking
+        switch (id.getBsonType()) {
+            case OBJECT_ID:
+                return id.asObjectId().getValue().toHexString();
+            case STRING:
+                String str = id.asString().getValue();
+                return str.length() > 20 ? str.substring(0, 20) + "..." : str;
+            case INT32:
+                return String.valueOf(id.asInt32().getValue());
+            case INT64:
+                return String.valueOf(id.asInt64().getValue());
+            default:
+                String repr = id.toString();
+                return repr.length() > 20 ? repr.substring(0, 20) + "..." : repr;
+        }
+    }
+    
+    private void printPerShardComparison() {
+        if (shardWorkloads.size() < 2) return;
+        
+        System.out.println("\n--- PER-SHARD COMPARISON ---");
+        
+        // Calculate statistics across shards
+        double totalOpsAll = shardWorkloads.values().stream().mapToLong(w -> w.totalOps).sum();
+        double avgOpsPerShard = totalOpsAll / shardWorkloads.size();
+        
+        long totalBytesAll = shardWorkloads.values().stream().mapToLong(w -> w.totalBytes).sum();
+        double avgBytesPerShard = (double) totalBytesAll / shardWorkloads.size();
+        
+        System.out.printf("Cluster averages: %.0f ops/shard, %.1f KB/op%n", 
+            avgOpsPerShard, (totalBytesAll / totalOpsAll) / 1024);
+        
+        // Identify outliers
+        for (ShardWorkload workload : shardWorkloads.values()) {
+            double opDeviation = (workload.totalOps - avgOpsPerShard) / avgOpsPerShard * 100;
+            double byteDeviation = (workload.totalBytes - avgBytesPerShard) / avgBytesPerShard * 100;
+            
+            String status = "";
+            if (Math.abs(opDeviation) > 20 || Math.abs(byteDeviation) > 20) {
+                if (opDeviation > 20) status += "HIGH-OPS ";
+                if (opDeviation < -20) status += "LOW-OPS ";
+                if (byteDeviation > 20) status += "HIGH-BYTES ";
+                if (byteDeviation < -20) status += "LOW-BYTES ";
+                
+                System.out.printf("  🔴 %s [%s]: %,d ops (%+.0f%%), %.1f KB/op (%+.0f%%)%n",
+                    workload.shardId, status.trim(), workload.totalOps, opDeviation, 
+                    workload.avgBytesPerOp / 1024, byteDeviation);
+            } else {
+                System.out.printf("  ✅ %s: %,d ops (%.0f%%), %.1f KB/op (%.0f%%)%n",
+                    workload.shardId, workload.totalOps, opDeviation, 
+                    workload.avgBytesPerOp / 1024, byteDeviation);
+            }
+        }
+    }
+    
+    private void printIdUpdateFrequency() {
+        if (idUpdateFrequency.isEmpty()) return;
+        
+        System.out.println("\n--- ID UPDATE FREQUENCY ANALYSIS ---");
+        
+        for (Map.Entry<String, Map<String, Integer>> nsEntry : idUpdateFrequency.entrySet()) {
+            String namespace = nsEntry.getKey();
+            Map<String, Integer> idCounts = nsEntry.getValue();
+            
+            if (idCounts.isEmpty()) continue;
+            
+            // Calculate frequency statistics
+            int totalUpdates = idCounts.values().stream().mapToInt(Integer::intValue).sum();
+            double avgUpdatesPerID = (double) totalUpdates / idCounts.size();
+            int maxUpdates = idCounts.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+            int minUpdates = idCounts.values().stream().mapToInt(Integer::intValue).min().orElse(0);
+            
+            System.out.printf("\n📊 %s update patterns:%n", namespace);
+            System.out.printf("  Total updates: %,d across %,d unique IDs%n", totalUpdates, idCounts.size());
+            System.out.printf("  Frequency range: %d-%d updates/ID (avg: %.1f)%n", minUpdates, maxUpdates, avgUpdatesPerID);
+            
+            // Show hot IDs (frequently updated)
+            List<Map.Entry<String, Integer>> hotIds = idCounts.entrySet().stream()
+                .filter(e -> e.getValue() > avgUpdatesPerID * 2) // More than 2x average
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .limit(10)
+                .collect(Collectors.toList());
+            
+            if (!hotIds.isEmpty()) {
+                System.out.println("  🔥 Hot IDs (frequent updates):");
+                hotIds.forEach(entry -> 
+                    System.out.printf("    %s: %d updates%n", entry.getKey(), entry.getValue()));
+            }
+            
+            // Warn about potential hotspots
+            if (maxUpdates > avgUpdatesPerID * 5) {
+                System.out.printf("  ⚠️  WARNING: Some IDs updated %dx more than average - potential hotspots%n", 
+                    (int)(maxUpdates / avgUpdatesPerID));
+            }
+        }
+    }
 }
