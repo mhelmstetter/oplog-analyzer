@@ -25,6 +25,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import org.bson.BsonArray;
 import org.bson.BsonBinary;
@@ -103,6 +105,11 @@ public class TailCommand implements Callable<Integer> {
     private List<ShardTailWorker> workers = new java.util.ArrayList<>();
     private List<Map<OplogEntryKey, EntryAccumulator>> shardAccumulators = null;
     private volatile boolean resultsAlreadyMerged = false;
+    
+    // Memory monitoring
+    private ScheduledExecutorService memoryMonitor = null;
+    private volatile long lastMemoryWarning = 0;
+    private static final long MEMORY_WARNING_INTERVAL = 30000; // 30 seconds between warnings
     
     static class IdStatistics {
         long count = 0;
@@ -479,8 +486,8 @@ public class TailCommand implements Callable<Integer> {
                             }
                             
                             long lagSeconds = calculateLagSeconds(lastOplogTimestamp);
-                            logger.info("[{}] Processed {} entries, Lag: {}s", 
-                                shardId, String.format("%,d", count), lagSeconds);
+                            logger.info("[{}] Processed {} entries, Lag: {}s, {}", 
+                                shardId, String.format("%,d", count), lagSeconds, getMemoryStats());
                             lastReportTime = currentTime;
                         }
                         
@@ -525,11 +532,14 @@ public class TailCommand implements Callable<Integer> {
         try {
             initializeClient();
             setupShutdownHook();
+            startMemoryMonitoring();
             analyze();
             return 0;
         } catch (IOException e) {
             logger.error("Error analyzing oplog", e);
             return 1;
+        } finally {
+            stopMemoryMonitoring();
         }
     }
     
@@ -920,6 +930,64 @@ public class TailCommand implements Callable<Integer> {
         doc = coll.find().comment("getLatestOplogTimestamp").projection(include("ts")).sort(eq("$natural", -1)).first();
         BsonTimestamp ts = (BsonTimestamp) doc.get("ts");
         return ts;
+    }
+    
+    private void startMemoryMonitoring() {
+        memoryMonitor = Executors.newScheduledThreadPool(1);
+        memoryMonitor.scheduleAtFixedRate(() -> {
+            Runtime runtime = Runtime.getRuntime();
+            long maxMemory = runtime.maxMemory();
+            long totalMemory = runtime.totalMemory();
+            long freeMemory = runtime.freeMemory();
+            long usedMemory = totalMemory - freeMemory;
+            double usedPercent = (usedMemory * 100.0) / maxMemory;
+            
+            // Log memory stats every 5 seconds at DEBUG level
+            logger.debug("Memory: Used={} MB ({}%), Free={} MB, Max={} MB", 
+                usedMemory / (1024 * 1024),
+                String.format("%.1f", usedPercent),
+                freeMemory / (1024 * 1024),
+                maxMemory / (1024 * 1024));
+            
+            // Warn if memory usage is high (>80%)
+            if (usedPercent > 80) {
+                long now = System.currentTimeMillis();
+                if (now - lastMemoryWarning > MEMORY_WARNING_INTERVAL) {
+                    logger.warn("High memory usage: {}% ({} MB / {} MB). Consider increasing heap size with -Xmx", 
+                        String.format("%.1f", usedPercent),
+                        usedMemory / (1024 * 1024),
+                        maxMemory / (1024 * 1024));
+                    lastMemoryWarning = now;
+                }
+            }
+        }, 0, 5, TimeUnit.SECONDS);
+    }
+    
+    private void stopMemoryMonitoring() {
+        if (memoryMonitor != null) {
+            memoryMonitor.shutdown();
+            try {
+                if (!memoryMonitor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    memoryMonitor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                memoryMonitor.shutdownNow();
+            }
+        }
+    }
+    
+    private String getMemoryStats() {
+        Runtime runtime = Runtime.getRuntime();
+        long maxMemory = runtime.maxMemory();
+        long totalMemory = runtime.totalMemory();
+        long freeMemory = runtime.freeMemory();
+        long usedMemory = totalMemory - freeMemory;
+        double usedPercent = (usedMemory * 100.0) / maxMemory;
+        
+        return String.format("Mem: %.1f%% (%dMB/%dMB)", 
+            usedPercent, 
+            usedMemory / (1024 * 1024), 
+            maxMemory / (1024 * 1024));
     }
     
     public void report() {
