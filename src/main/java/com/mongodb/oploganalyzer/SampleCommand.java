@@ -141,9 +141,11 @@ public class SampleCommand extends BaseOplogCommand {
         sampleSingleShard("replica-set", mongoClient);
     }
     
+    private ExecutorService shardExecutor;
+    
     private void sampleShardedCluster() throws IOException {
         Map<String, MongoClient> shardClients = shardClient.getShardMongoClients();
-        ExecutorService executor = Executors.newFixedThreadPool(shardClients.size());
+        shardExecutor = Executors.newFixedThreadPool(shardClients.size());
         
         System.out.println(String.format("Starting sampling on %d shards", shardClients.size()));
         
@@ -152,7 +154,7 @@ public class SampleCommand extends BaseOplogCommand {
             MongoClient mongoClient = entry.getValue();
             perShardCounts.put(shardId, new AtomicLong(0));
             
-            executor.submit(() -> {
+            shardExecutor.submit(() -> {
                 try {
                     sampleSingleShard(shardId, mongoClient);
                 } catch (Exception e) {
@@ -170,7 +172,13 @@ public class SampleCommand extends BaseOplogCommand {
             logger.debug("Main thread interrupted");
         }
         
-        executor.shutdownNow();
+        // Shutdown executor and wait for threads to complete
+        shardExecutor.shutdownNow();
+        try {
+            shardExecutor.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            logger.debug("Interrupted while waiting for executor shutdown");
+        }
     }
     
     private void sampleSingleShard(String shardId, MongoClient mongoClient) throws IOException {
@@ -304,7 +312,7 @@ public class SampleCommand extends BaseOplogCommand {
         return sb.toString();
     }
     
-    private synchronized void writeSample(String shardId, RawBsonDocument doc) {
+    private void writeSample(String shardId, RawBsonDocument doc) {
         try {
             if (compress) {
                 GZIPOutputStream gzipStream = shardGzipStreams.computeIfAbsent(shardId, k -> {
@@ -422,7 +430,24 @@ public class SampleCommand extends BaseOplogCommand {
         }
     }
     
-    private void cleanup() {
+    private volatile boolean cleanupDone = false;
+    
+    private synchronized void cleanup() {
+        if (cleanupDone) {
+            return; // Prevent double cleanup
+        }
+        cleanupDone = true;
+        
+        // First stop the executor if still running
+        if (shardExecutor != null && !shardExecutor.isTerminated()) {
+            shardExecutor.shutdownNow();
+            try {
+                shardExecutor.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                logger.debug("Interrupted while waiting for executor shutdown in cleanup");
+            }
+        }
+        
         if (statusMonitor != null) {
             statusMonitor.shutdown();
         }
@@ -439,6 +464,7 @@ public class SampleCommand extends BaseOplogCommand {
                 logger.error("Error closing gzip stream for shard {}", entry.getKey(), e);
             }
         }
+        shardGzipStreams.clear();
         
         // Close all shard channels
         for (Map.Entry<String, FileChannel> entry : shardChannels.entrySet()) {
@@ -451,5 +477,6 @@ public class SampleCommand extends BaseOplogCommand {
                 logger.error("Error closing channel for shard {}", entry.getKey(), e);
             }
         }
+        shardChannels.clear();
     }
 }
