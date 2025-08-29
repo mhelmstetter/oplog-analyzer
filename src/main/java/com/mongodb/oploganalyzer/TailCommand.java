@@ -111,6 +111,12 @@ public class TailCommand implements Callable<Integer> {
     private volatile long lastMemoryWarning = 0;
     private static final long MEMORY_WARNING_INTERVAL = 30000; // 30 seconds between warnings
     
+    // Global statistics for memory tracking
+    private volatile long totalBytesProcessed = 0;
+    private volatile long totalDocsProcessed = 0;
+    private volatile long largestDocSize = 0;
+    private volatile String largestDocNamespace = "";
+    
     static class IdStatistics {
         long count = 0;
         // Document sizes
@@ -195,6 +201,10 @@ public class TailCommand implements Callable<Integer> {
                     break;
                 }
             }
+        }
+        
+        public int getPendingUpdatesCount() {
+            return pendingUpdates.size();
         }
         
         @Override
@@ -375,6 +385,16 @@ public class TailCommand implements Callable<Integer> {
                         }
 
                         long docSize = doc.getByteBuffer().remaining();
+                        
+                        // Track global statistics
+                        synchronized (this) {
+                            totalBytesProcessed += docSize;
+                            totalDocsProcessed++;
+                            if (docSize > largestDocSize) {
+                                largestDocSize = docSize;
+                                largestDocNamespace = ns;
+                            }
+                        }
                         
                         // Handle applyOps operations (transactions/bulk ops)
                         if ("c".equals(opType) && ns.endsWith(".$cmd")) {
@@ -942,12 +962,47 @@ public class TailCommand implements Callable<Integer> {
             long usedMemory = totalMemory - freeMemory;
             double usedPercent = (usedMemory * 100.0) / maxMemory;
             
-            // Log memory stats every 5 seconds at DEBUG level
-            logger.debug("Memory: Used={} MB ({}%), Free={} MB, Max={} MB", 
+            // Calculate data structure sizes
+            int totalAccumulators = 0;
+            int totalPendingUpdates = 0;
+            long cacheSize = 0;
+            
+            // Count accumulators across all shards
+            if (shardAccumulators != null) {
+                for (Map<OplogEntryKey, EntryAccumulator> shardAccum : shardAccumulators) {
+                    if (shardAccum != null) {
+                        totalAccumulators += shardAccum.size();
+                    }
+                }
+            }
+            // Main accumulator map
+            if (accumulators != null) {
+                totalAccumulators += accumulators.size();
+            }
+            
+            // Count pending updates across all workers
+            if (workers != null) {
+                for (ShardTailWorker worker : workers) {
+                    totalPendingUpdates += worker.getPendingUpdatesCount();
+                }
+            }
+            
+            // Cache size
+            if (idStatsCache != null) {
+                cacheSize = idStatsCache.estimatedSize();
+            }
+            
+            // Log memory stats every 5 seconds at DEBUG level with data structure info
+            logger.debug("Memory: Used={} MB ({}%), Free={} MB, Max={} MB | Accumulators={}, Cache={}, PendingUpdates={} | Docs={}, TotalBytes={} MB", 
                 usedMemory / (1024 * 1024),
                 String.format("%.1f", usedPercent),
                 freeMemory / (1024 * 1024),
-                maxMemory / (1024 * 1024));
+                maxMemory / (1024 * 1024),
+                totalAccumulators,
+                cacheSize,
+                totalPendingUpdates,
+                totalDocsProcessed,
+                totalBytesProcessed / (1024 * 1024));
             
             // Warn if memory usage is high (>80%)
             if (usedPercent > 80) {
@@ -957,8 +1012,64 @@ public class TailCommand implements Callable<Integer> {
                         String.format("%.1f", usedPercent),
                         usedMemory / (1024 * 1024),
                         maxMemory / (1024 * 1024));
+                    logger.warn("Data structures: Accumulators={}, IdStatsCache={}, PendingUpdates={}", 
+                        totalAccumulators, cacheSize, totalPendingUpdates);
+                    logger.warn("Processing stats: Docs={}, TotalBytes={} MB, LargestDoc={} KB in {}", 
+                        totalDocsProcessed, 
+                        totalBytesProcessed / (1024 * 1024),
+                        largestDocSize / 1024,
+                        largestDocNamespace);
+                    
+                    // Log top memory consumers if we have them
+                    if (totalAccumulators > 1000) {
+                        logger.warn("Large number of accumulators detected ({} entries). Consider using namespace filtering.", totalAccumulators);
+                    }
+                    if (cacheSize > 10000) {
+                        logger.warn("Large ID cache size ({} entries). Consider reducing --topIdCount or disabling --idStats.", cacheSize);
+                    }
+                    
+                    // Check if we're holding too many raw BSON documents
+                    long avgDocSize = totalDocsProcessed > 0 ? totalBytesProcessed / totalDocsProcessed : 0;
+                    if (avgDocSize > 100 * 1024) { // avg > 100KB
+                        logger.warn("Large average document size: {} KB. Consider filtering large namespaces.", avgDocSize / 1024);
+                    }
                     lastMemoryWarning = now;
                 }
+            }
+            
+            // Critical memory usage (>95%) - log top namespaces and trigger GC
+            if (usedPercent > 95) {
+                logger.error("CRITICAL memory usage: {}%", String.format("%.1f", usedPercent));
+                
+                if (accumulators != null && !accumulators.isEmpty()) {
+                    logger.error("Top 5 namespaces by operation count:");
+                    accumulators.values().stream()
+                        .sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
+                        .limit(5)
+                        .forEach(acc -> logger.error("  {}: {} ops, total size: {} KB", 
+                            acc.getNamespace(), 
+                            acc.getCount(),
+                            acc.getTotal() / 1024));
+                }
+                
+                // Try to free memory by forcing GC
+                logger.warn("Attempting garbage collection due to critical memory usage...");
+                System.gc();
+                
+                // Re-check memory after GC
+                try {
+                    Thread.sleep(500); // Give GC time to run
+                } catch (InterruptedException e) {
+                    // Ignore
+                }
+                
+                Runtime postGcRuntime = Runtime.getRuntime();
+                long postGcUsed = postGcRuntime.totalMemory() - postGcRuntime.freeMemory();
+                double postGcPercent = (postGcUsed * 100.0) / postGcRuntime.maxMemory();
+                logger.info("Memory after GC: {}% ({} MB / {} MB)", 
+                    String.format("%.1f", postGcPercent),
+                    postGcUsed / (1024 * 1024),
+                    postGcRuntime.maxMemory() / (1024 * 1024));
             }
         }, 0, 5, TimeUnit.SECONDS);
     }
