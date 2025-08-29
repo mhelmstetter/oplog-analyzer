@@ -128,10 +128,13 @@ public class AnalyzeCommand implements Callable<Integer> {
                 return 1;
             }
             
-            // Process stats file first if provided
-            if (statsFile != null) {
-                System.out.printf("Loading full statistics from: %s%n", statsFile);
-                loadStatsReport(statsFile);
+            // Auto-detect or load stats file
+            String detectedStatsFile = statsFile != null ? statsFile : autoDetectStatsFile();
+            if (detectedStatsFile != null) {
+                System.out.printf("Loading full statistics from: %s%n", detectedStatsFile);
+                loadStatsReport(detectedStatsFile);
+            } else {
+                System.out.println("No stats file found - using sample-only analysis");
             }
             
             System.out.printf("Analyzing %d BSON files...%n", inputFiles.size());
@@ -704,6 +707,51 @@ public class AnalyzeCommand implements Callable<Integer> {
             this.totalBytes = totalBytes;
             this.uniqueIds = uniqueIds;
         }
+    }
+    
+    private String autoDetectStatsFile() {
+        // Extract common prefix from BSON files to find corresponding stats file
+        if (inputFiles.isEmpty()) return null;
+        
+        // Look for pattern like "oplog_sample_2025-08-29_14-48-30_<shard>.bson.gz"
+        // and find corresponding "oplog_sample_2025-08-29_14-48-30_stats.json"
+        for (String fileName : inputFiles) {
+            if (fileName.contains("_shard-") || fileName.contains("_config.")) {
+                // Extract the base pattern: oplog_sample_2025-08-29_14-48-30
+                String baseName = extractBaseName(fileName);
+                if (baseName != null) {
+                    String statsFileName = baseName + "_stats.json";
+                    File statsFile = new File(statsFileName);
+                    if (statsFile.exists()) {
+                        return statsFileName;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+    
+    private String extractBaseName(String fileName) {
+        // Extract base name from patterns like:
+        // oplog_sample_2025-08-29_14-48-30_rollups-3-shard-0.bson.gz
+        // oplog_sample_2025-08-29_14-48-30_config.bson.gz
+        
+        // Remove file extension
+        String baseName = fileName.replaceAll("\\.bson(\\.gz)?$", "");
+        
+        // Remove shard-specific suffix
+        if (baseName.contains("_rollups-")) {
+            int shardIndex = baseName.lastIndexOf("_rollups-");
+            if (shardIndex > 0) {
+                return baseName.substring(0, shardIndex);
+            }
+        }
+        
+        if (baseName.endsWith("_config")) {
+            return baseName.substring(0, baseName.lastIndexOf("_config"));
+        }
+        
+        return null;
     }
     
     private void loadStatsReport(String fileName) throws IOException {
