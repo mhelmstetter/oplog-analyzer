@@ -52,6 +52,7 @@ public class AnalyzeCommand implements Callable<Integer> {
     private final Map<String, ShardKeyInfo> shardKeys = new HashMap<>();
     private final Map<String, CollectionPattern> collectionPatterns = new HashMap<>();
     private final Map<String, Map<String, UpdateStats>> idUpdateFrequency = new HashMap<>(); // namespace -> id -> stats
+    private final Map<String, Map<String, Map<String, UpdateStats>>> shardIdUpdateFrequency = new HashMap<>(); // shard -> namespace -> id -> stats
     
     static class UpdateStats {
         int count = 0;
@@ -324,7 +325,15 @@ public class AnalyzeCommand implements Callable<Integer> {
                 BsonValue id = extractDocumentId(doc);
                 if (id != null) {
                     String idString = formatIdForFrequency(id);
+                    
+                    // Track global namespace stats
                     idUpdateFrequency.computeIfAbsent(namespace, k -> new HashMap<>())
+                        .computeIfAbsent(idString, k -> new UpdateStats())
+                        .addUpdate(docSize);
+                    
+                    // Track per-shard namespace stats
+                    shardIdUpdateFrequency.computeIfAbsent(shardId, k -> new HashMap<>())
+                        .computeIfAbsent(namespace, k -> new HashMap<>())
                         .computeIfAbsent(idString, k -> new UpdateStats())
                         .addUpdate(docSize);
                 }
@@ -584,73 +593,105 @@ public class AnalyzeCommand implements Callable<Integer> {
     }
     
     private void printIdUpdateFrequency() {
-        if (idUpdateFrequency.isEmpty()) return;
+        if (shardIdUpdateFrequency.isEmpty()) return;
         
         System.out.println("\n--- ID UPDATE FREQUENCY ANALYSIS ---");
         
+        // First show overall namespace patterns
         for (Map.Entry<String, Map<String, UpdateStats>> nsEntry : idUpdateFrequency.entrySet()) {
             String namespace = nsEntry.getKey();
             Map<String, UpdateStats> idStats = nsEntry.getValue();
             
             if (idStats.isEmpty()) continue;
             
+            System.out.printf("\n📊 %s - Overall update patterns:%n", namespace);
+            
             // Calculate frequency statistics
             int totalUpdates = idStats.values().stream().mapToInt(s -> s.count).sum();
             double avgUpdatesPerID = (double) totalUpdates / idStats.size();
-            int maxUpdates = idStats.values().stream().mapToInt(s -> s.count).max().orElse(0);
-            int minUpdates = idStats.values().stream().mapToInt(s -> s.count).min().orElse(0);
-            
-            // Calculate size statistics
             long totalUpdateBytes = idStats.values().stream().mapToLong(s -> s.totalSize).sum();
             double avgSizePerUpdate = totalUpdates > 0 ? (double) totalUpdateBytes / totalUpdates : 0;
             
-            System.out.printf("\n📊 %s update patterns:%n", namespace);
-            System.out.printf("  Total updates: %,d across %,d unique IDs%n", totalUpdates, idStats.size());
-            System.out.printf("  Frequency range: %d-%d updates/ID (avg: %.1f)%n", minUpdates, maxUpdates, avgUpdatesPerID);
-            System.out.printf("  Update size: %.1f KB average (%s total)%n", 
-                avgSizePerUpdate / 1024, org.apache.commons.io.FileUtils.byteCountToDisplaySize(totalUpdateBytes));
+            System.out.printf("  %,d updates across %,d unique IDs (%.1f updates/ID avg, %.1f KB/update avg)%n", 
+                totalUpdates, idStats.size(), avgUpdatesPerID, avgSizePerUpdate / 1024);
             
-            // Show hot IDs (frequently updated)
-            List<Map.Entry<String, UpdateStats>> hotIds = idStats.entrySet().stream()
-                .filter(e -> e.getValue().count > avgUpdatesPerID * 2) // More than 2x average
-                .sorted(Map.Entry.<String, UpdateStats>comparingByValue(
-                    Comparator.comparingInt((UpdateStats s) -> s.count)).reversed())
-                .limit(10)
-                .collect(Collectors.toList());
-            
-            if (!hotIds.isEmpty()) {
-                System.out.println("  🔥 Hot IDs (frequent updates):");
-                hotIds.forEach(entry -> {
-                    UpdateStats stats = entry.getValue();
-                    System.out.printf("    %s: %d updates, %.1f KB avg, %s total%n", 
-                        entry.getKey(), stats.count, stats.getAvgSize() / 1024,
-                        org.apache.commons.io.FileUtils.byteCountToDisplaySize(stats.totalSize));
-                });
+            // Now analyze cross-shard patterns for this namespace
+            analyzeIdAcrossShards(namespace);
+        }
+    }
+    
+    private void analyzeIdAcrossShards(String namespace) {
+        // Collect all IDs for this namespace across all shards
+        Map<String, Map<String, UpdateStats>> idToShardStats = new HashMap<>(); // id -> shard -> stats
+        
+        for (Map.Entry<String, Map<String, Map<String, UpdateStats>>> shardEntry : shardIdUpdateFrequency.entrySet()) {
+            String shardId = shardEntry.getKey();
+            Map<String, UpdateStats> nsStats = shardEntry.getValue().get(namespace);
+            if (nsStats != null) {
+                for (Map.Entry<String, UpdateStats> idEntry : nsStats.entrySet()) {
+                    String id = idEntry.getKey();
+                    UpdateStats stats = idEntry.getValue();
+                    idToShardStats.computeIfAbsent(id, k -> new HashMap<>()).put(shardId, stats);
+                }
             }
+        }
+        
+        if (idToShardStats.isEmpty()) return;
+        
+        // Find IDs that show significant shard imbalances
+        System.out.println("\n  🔍 Cross-shard ID patterns:");
+        
+        for (Map.Entry<String, Map<String, UpdateStats>> idEntry : idToShardStats.entrySet()) {
+            String id = idEntry.getKey();
+            Map<String, UpdateStats> shardStats = idEntry.getValue();
             
-            // Show large update IDs
-            List<Map.Entry<String, UpdateStats>> largeUpdateIds = idStats.entrySet().stream()
-                .filter(e -> e.getValue().getAvgSize() > avgSizePerUpdate * 2)
-                .sorted(Map.Entry.<String, UpdateStats>comparingByValue(
-                    Comparator.comparingDouble((UpdateStats s) -> s.getAvgSize())).reversed())
-                .limit(5)
-                .collect(Collectors.toList());
+            // Skip IDs that only appear on one shard
+            if (shardStats.size() < 2) continue;
             
-            if (!largeUpdateIds.isEmpty()) {
-                System.out.println("  📏 Large update IDs:");
-                largeUpdateIds.forEach(entry -> {
-                    UpdateStats stats = entry.getValue();
-                    System.out.printf("    %s: %.1f KB avg (%d-%d KB range)%n",
-                        entry.getKey(), stats.getAvgSize() / 1024, 
-                        stats.minSize / 1024, stats.maxSize / 1024);
-                });
+            // Calculate statistics across shards for this ID
+            int totalUpdatesForId = shardStats.values().stream().mapToInt(s -> s.count).sum();
+            double avgUpdatesPerShard = (double) totalUpdatesForId / shardStats.size();
+            
+            int maxShardUpdates = shardStats.values().stream().mapToInt(s -> s.count).max().orElse(0);
+            int minShardUpdates = shardStats.values().stream().mapToInt(s -> s.count).min().orElse(0);
+            
+            // Check for significant imbalance (>2x difference or >50% of updates on one shard)
+            boolean hasImbalance = maxShardUpdates > minShardUpdates * 2 || 
+                                 maxShardUpdates > totalUpdatesForId * 0.5;
+            
+            if (hasImbalance && totalUpdatesForId >= 10) { // Only show if meaningful number of updates
+                System.out.printf("    ID %s (%d total updates across %d shards):%n", 
+                    id, totalUpdatesForId, shardStats.size());
+                
+                // Show per-shard breakdown sorted by update count
+                shardStats.entrySet().stream()
+                    .sorted(Map.Entry.<String, UpdateStats>comparingByValue(
+                        Comparator.comparingInt((UpdateStats s) -> s.count)).reversed())
+                    .forEach(entry -> {
+                        String shardId = entry.getKey();
+                        UpdateStats stats = entry.getValue();
+                        double percentage = (double) stats.count / totalUpdatesForId * 100;
+                        System.out.printf("      %s: %d updates (%.1f%%), %.1f KB avg%n", 
+                            shardId, stats.count, percentage, stats.getAvgSize() / 1024);
+                    });
+                
+                // Highlight the imbalance
+                if (maxShardUpdates > totalUpdatesForId * 0.7) {
+                    System.out.println("      🔴 SEVERE: One shard handles >70% of updates for this ID");
+                } else if (maxShardUpdates > totalUpdatesForId * 0.5) {
+                    System.out.println("      🟡 MODERATE: One shard handles >50% of updates for this ID");
+                }
+                System.out.println();
             }
-            
-            // Warn about potential hotspots
-            if (maxUpdates > avgUpdatesPerID * 5) {
-                System.out.printf("  ⚠️  WARNING: Some IDs updated %dx more than average - potential hotspots%n", 
-                    (int)(maxUpdates / avgUpdatesPerID));
-            }
+        }
+        
+        // Summary of cross-shard ID distribution
+        long totalCrossShardIds = idToShardStats.entrySet().stream()
+            .filter(e -> e.getValue().size() > 1)
+            .count();
+        
+        if (totalCrossShardIds > 0) {
+            System.out.printf("  📈 Found %d IDs appearing across multiple shards%n", totalCrossShardIds);
         }
     }
 }
