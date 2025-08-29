@@ -3,7 +3,10 @@ package com.mongodb.oploganalyzer;
 import static com.mongodb.client.model.Filters.gte;
 
 import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.time.Instant;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.text.SimpleDateFormat;
@@ -57,6 +60,12 @@ public class SampleCommand extends BaseOplogCommand {
     @Option(names = {"--statusInterval"}, description = "Status report interval in seconds (default: 30)", defaultValue = "30")
     private int statusInterval = 30;
     
+    @Option(names = {"--shardStats"}, description = "Track and report full per-shard statistics alongside sampling")
+    private boolean shardStats = true;
+    
+    @Option(names = {"--statsFormat"}, description = "Format for stats report output: json or bson (default: json)", defaultValue = "json")
+    private String statsFormat = "json";
+    
     private ShardClient shardClient;
     private boolean shutdown = false;
     
@@ -74,6 +83,9 @@ public class SampleCommand extends BaseOplogCommand {
     private final AtomicLong totalEntriesSampled = new AtomicLong(0);
     private final Map<String, AtomicLong> perShardCounts = new ConcurrentHashMap<>();
     
+    // Full shard statistics (when shardStats is enabled)
+    private Map<String, Map<OplogEntryKey, EntryAccumulator>> perShardFullStats;
+    
     // Status monitoring
     private ScheduledExecutorService statusMonitor;
     
@@ -84,6 +96,11 @@ public class SampleCommand extends BaseOplogCommand {
             setupShutdownHook();
             startStatusMonitoring();
             sample();
+            
+            if (shardStats) {
+                writeStatsReport();
+            }
+            
             return 0;
         } catch (IOException e) {
             logger.error("Error sampling oplog", e);
@@ -149,10 +166,20 @@ public class SampleCommand extends BaseOplogCommand {
         
         System.out.println(String.format("Starting sampling on %d shards", shardClients.size()));
         
+        // Initialize per-shard full statistics if enabled
+        if (shardStats) {
+            perShardFullStats = new ConcurrentHashMap<>();
+        }
+        
         for (Map.Entry<String, MongoClient> entry : shardClients.entrySet()) {
             String shardId = entry.getKey();
             MongoClient mongoClient = entry.getValue();
             perShardCounts.put(shardId, new AtomicLong(0));
+            
+            // Initialize per-shard stats tracking
+            if (shardStats) {
+                perShardFullStats.put(shardId, new ConcurrentHashMap<>());
+            }
             
             shardExecutor.submit(() -> {
                 try {
@@ -205,9 +232,15 @@ public class SampleCommand extends BaseOplogCommand {
                     perShardCounts.get(shardId).incrementAndGet();
                     
                     String ns = ((BsonString) doc.get("ns")).getValue();
+                    String opType = ((BsonString) doc.get("op")).getValue();
                     
                     if (ns.startsWith("config.")) {
                         continue;
+                    }
+                    
+                    // Track full statistics for all operations if enabled
+                    if (shardStats) {
+                        trackFullShardStats(shardId, ns, opType, doc.getByteBuffer().remaining());
                     }
                     
                     // Extract _id for sampling decision
@@ -310,6 +343,17 @@ public class SampleCommand extends BaseOplogCommand {
             sb.append(String.format("%02x", bytes[i] & 0xff));
         }
         return sb.toString();
+    }
+    
+    private void trackFullShardStats(String shardId, String ns, String opType, long docSize) {
+        if (perShardFullStats != null) {
+            Map<OplogEntryKey, EntryAccumulator> shardMap = perShardFullStats.get(shardId);
+            if (shardMap != null) {
+                OplogEntryKey key = new OplogEntryKey(ns, opType);
+                EntryAccumulator acc = shardMap.computeIfAbsent(key, k -> new EntryAccumulator(k));
+                acc.addExecution(docSize);
+            }
+        }
     }
     
     private void writeSample(String shardId, RawBsonDocument doc) {
@@ -478,5 +522,82 @@ public class SampleCommand extends BaseOplogCommand {
             }
         }
         shardChannels.clear();
+    }
+    
+    private void writeStatsReport() {
+        if (perShardFullStats == null || perShardFullStats.isEmpty()) {
+            logger.warn("No shard statistics collected");
+            return;
+        }
+        
+        String statsFileName = baseFileName + "_stats." + statsFormat;
+        System.out.println("Writing full statistics report to: " + statsFileName);
+        
+        try (PrintWriter writer = new PrintWriter(new FileWriter(statsFileName))) {
+            if ("json".equals(statsFormat)) {
+                writeStatsAsJson(writer);
+            } else {
+                writeStatsAsBson(statsFileName);
+            }
+        } catch (IOException e) {
+            logger.error("Error writing stats report", e);
+        }
+    }
+    
+    private void writeStatsAsJson(PrintWriter writer) {
+        writer.println("{");
+        writer.println("  \"timestamp\": \"" + Instant.now() + "\",");
+        writer.println("  \"samplingPeriod\": \"" + baseFileName + "\",");
+        writer.println("  \"totalProcessed\": " + totalEntriesProcessed.get() + ",");
+        writer.println("  \"totalSampled\": " + totalEntriesSampled.get() + ",");
+        writer.println("  \"shards\": {");
+        
+        List<String> shardIds = new ArrayList<>(perShardFullStats.keySet());
+        Collections.sort(shardIds);
+        
+        for (int i = 0; i < shardIds.size(); i++) {
+            String shardId = shardIds.get(i);
+            Map<OplogEntryKey, EntryAccumulator> shardStats = perShardFullStats.get(shardId);
+            
+            writer.println("    \"" + shardId + "\": {");
+            writer.println("      \"processedOps\": " + perShardCounts.get(shardId).get() + ",");
+            writer.println("      \"collections\": {");
+            
+            List<OplogEntryKey> keys = new ArrayList<>(shardStats.keySet());
+            keys.sort((k1, k2) -> Long.compare(
+                shardStats.get(k2).getTotal(), shardStats.get(k1).getTotal()));
+            
+            for (int j = 0; j < keys.size(); j++) {
+                OplogEntryKey key = keys.get(j);
+                EntryAccumulator acc = shardStats.get(key);
+                
+                writer.println("        \"" + key.ns + "." + key.op + "\": {");
+                writer.println("          \"count\": " + acc.getCount() + ",");
+                writer.println("          \"totalBytes\": " + acc.getTotal() + ",");
+                writer.println("          \"avgBytes\": " + acc.getAvg() + ",");
+                writer.println("          \"minBytes\": " + acc.getMin() + ",");
+                writer.println("          \"maxBytes\": " + acc.getMax());
+                writer.print("        }");
+                if (j < keys.size() - 1) writer.println(",");
+                else writer.println();
+            }
+            
+            writer.print("      }\n    }");
+            if (i < shardIds.size() - 1) writer.println(",");
+            else writer.println();
+        }
+        
+        writer.println("  }");
+        writer.println("}");
+    }
+    
+    private void writeStatsAsBson(String fileName) {
+        // TODO: Implement BSON output format if needed
+        logger.info("BSON stats format not yet implemented, using JSON");
+        try (PrintWriter writer = new PrintWriter(new FileWriter(fileName))) {
+            writeStatsAsJson(writer);
+        } catch (IOException e) {
+            logger.error("Error writing BSON stats report", e);
+        }
     }
 }
