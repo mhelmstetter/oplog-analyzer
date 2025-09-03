@@ -264,9 +264,6 @@ public class ScanCommand extends BaseOplogCommand {
             
             // Get oplog stats
             try {
-                long oplogCount = oplog.countDocuments();
-                logger.info("[{}] Oplog collection total documents: {}", shardId, oplogCount);
-                
                 // Get first and last oplog entries for time range
                 RawBsonDocument firstEntry = oplog.find().sort(new Document("ts", 1)).limit(1).first();
                 RawBsonDocument lastEntry = oplog.find().sort(new Document("ts", -1)).limit(1).first();
@@ -282,10 +279,6 @@ public class ScanCommand extends BaseOplogCommand {
                     logger.info("[{}] Last oplog entry timestamp: {} (time: {}, inc: {})", 
                         shardId, lastTs, lastTs.getTime(), lastTs.getInc());
                 }
-                
-                // Count documents matching our query
-                long queryCount = oplog.countDocuments(query);
-                logger.info("[{}] Documents matching query: {}", shardId, queryCount);
             } catch (Exception e) {
                 logger.warn("[{}] Could not retrieve oplog statistics: {}", shardId, e.getMessage());
             }
