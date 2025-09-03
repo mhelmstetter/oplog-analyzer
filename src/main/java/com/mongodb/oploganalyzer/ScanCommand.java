@@ -56,6 +56,9 @@ public class ScanCommand extends BaseOplogCommand {
     @Option(names = {"-x", "--sheet"}, description = "Excel sheet name")
     private String sheetName;
     
+    @Option(names = {"--verbose"}, description = "Enable verbose logging for troubleshooting")
+    private boolean verbose;
+    
     // Shard and ID stats options inherited from BaseOplogCommand
     // accumulators, idStatisticsManager, shardClient, and stop inherited from BaseOplogCommand
     private Date startTime;
@@ -98,9 +101,15 @@ public class ScanCommand extends BaseOplogCommand {
     private void parseTimeOptions() {
         if (startTimeStr != null) {
             startTime = parseDate(startTimeStr);
+            if (verbose) {
+                logger.info("Parsed start time: {} -> {} (epoch: {})", startTimeStr, startTime, startTime.getTime());
+            }
         }
         if (endTimeStr != null) {
             endTime = parseDate(endTimeStr);
+            if (verbose) {
+                logger.info("Parsed end time: {} -> {} (epoch: {})", endTimeStr, endTime, endTime.getTime());
+            }
         }
     }
     
@@ -227,11 +236,17 @@ public class ScanCommand extends BaseOplogCommand {
         if (startTime != null) {
             long startSeconds = startTime.getTime() / 1000;
             startTimestamp = new BsonTimestamp((int) startSeconds, 1);
+            if (verbose) {
+                logger.info("[{}] Start timestamp: {} (seconds: {}, increment: 1)", shardId, startTimestamp, startSeconds);
+            }
         }
         
         if (endTime != null) {
             long endSeconds = endTime.getTime() / 1000;
             endTimestamp = new BsonTimestamp((int) endSeconds, 1);
+            if (verbose) {
+                logger.info("[{}] End timestamp: {} (seconds: {}, increment: 1)", shardId, endTimestamp, endSeconds);
+            }
         }
 
         Document query = new Document();
@@ -243,13 +258,57 @@ public class ScanCommand extends BaseOplogCommand {
         } else if (endTimestamp != null) {
             query.put("ts", new Document("$lte", endTimestamp));
         }
+        
+        if (verbose) {
+            logger.info("[{}] MongoDB query: {}", shardId, query.toJson());
+            
+            // Get oplog stats
+            try {
+                long oplogCount = oplog.countDocuments();
+                logger.info("[{}] Oplog collection total documents: {}", shardId, oplogCount);
+                
+                // Get first and last oplog entries for time range
+                RawBsonDocument firstEntry = oplog.find().sort(new Document("ts", 1)).limit(1).first();
+                RawBsonDocument lastEntry = oplog.find().sort(new Document("ts", -1)).limit(1).first();
+                
+                if (firstEntry != null) {
+                    BsonTimestamp firstTs = firstEntry.getTimestamp("ts");
+                    logger.info("[{}] First oplog entry timestamp: {} (time: {}, inc: {})", 
+                        shardId, firstTs, firstTs.getTime(), firstTs.getInc());
+                }
+                
+                if (lastEntry != null) {
+                    BsonTimestamp lastTs = lastEntry.getTimestamp("ts");
+                    logger.info("[{}] Last oplog entry timestamp: {} (time: {}, inc: {})", 
+                        shardId, lastTs, lastTs.getTime(), lastTs.getInc());
+                }
+                
+                // Count documents matching our query
+                long queryCount = oplog.countDocuments(query);
+                logger.info("[{}] Documents matching query: {}", shardId, queryCount);
+            } catch (Exception e) {
+                logger.warn("[{}] Could not retrieve oplog statistics: {}", shardId, e.getMessage());
+            }
+        }
 
         MongoCursor<RawBsonDocument> cursor = oplog.find(query).iterator();
 
         long count = 0;
         try {
+            if (verbose) {
+                logger.info("[{}] Starting to iterate cursor...", shardId);
+            }
+            
             while (cursor.hasNext() && !stop) {
                 RawBsonDocument doc = cursor.next();
+                
+                if (verbose && count == 0) {
+                    // Log details of the first document found
+                    BsonTimestamp docTs = doc.getTimestamp("ts");
+                    logger.info("[{}] First document found - ts: {} (time: {}, inc: {}), ns: {}, op: {}", 
+                        shardId, docTs, docTs.getTime(), docTs.getInc(), 
+                        doc.getString("ns").getValue(), doc.getString("op").getValue());
+                }
                 
                 // Process the oplog entry using base class method
                 processOplogEntryWithApplyOps(doc, shardId, targetAccumulators);
@@ -261,6 +320,16 @@ public class ScanCommand extends BaseOplogCommand {
             }
         } finally {
             cursor.close();
+            
+            if (verbose) {
+                if (count == 0) {
+                    logger.warn("[{}] No documents were found matching the query criteria", shardId);
+                    logger.warn("[{}] Please verify:", shardId);
+                    logger.warn("[{}]   - The time range contains oplog data", shardId);
+                    logger.warn("[{}]   - The timestamp format is correct (ISO 8601)", shardId);
+                    logger.warn("[{}]   - The shard contains data for the specified time range", shardId);
+                }
+            }
         }
         
         System.out.println(String.format("[%s] Total processed: %,d entries", shardId, count));
