@@ -172,6 +172,13 @@ public class ScanCommand extends BaseOplogCommand {
         List<String> shardIds = shardClients.keySet().stream().sorted().collect(Collectors.toList());
         List<String> targetShards = new java.util.ArrayList<>();
         
+        if (verbose) {
+            logger.info("Shard index mapping:");
+            for (int i = 0; i < shardIds.size(); i++) {
+                logger.info("  Index {} -> {}", i, shardIds.get(i));
+            }
+        }
+        
         for (String indexStr : indices) {
             try {
                 int index = Integer.parseInt(indexStr.trim());
