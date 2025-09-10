@@ -64,7 +64,7 @@ import com.mongodb.util.bson.BsonValueConverter;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
-@Command(name = "tail", description = "Tail oplog entries in real-time")
+@Command(name = "tail", description = "Tail oplog entries in real-time", mixinStandardHelpOptions = true)
 public class TailCommand implements Callable<Integer> {
     
     protected static final Logger logger = LoggerFactory.getLogger(TailCommand.class);
@@ -572,8 +572,8 @@ public class TailCommand implements Callable<Integer> {
                             continue;
                         }
                         
-                        // Print full document if it matches size filter and fullDocument is enabled
-                        if (fullDocument && (minSize != null || maxSize != null)) {
+                        // Print message when document matches size filter
+                        if (minSize != null || maxSize != null) {
                             BsonValue id = extractId(doc, opType);
                             String idString = id != null ? getIdString(id) : "unknown";
                             String sizeDisplay = org.apache.commons.io.FileUtils.byteCountToDisplaySize(docSize);
@@ -586,14 +586,17 @@ public class TailCommand implements Callable<Integer> {
                                     ns, sizeDisplay, idString));
                             }
                             
-                            try {
-                                // Use relaxed JSON mode to avoid unicode escaping
-                                String jsonString = doc.toJson(org.bson.json.JsonWriterSettings.builder()
-                                    .outputMode(org.bson.json.JsonMode.RELAXED)
-                                    .build());
-                                System.out.println(truncateDocumentFields(jsonString));
-                            } catch (Exception e) {
-                                System.out.println("Error converting document to JSON: " + e.getMessage());
+                            // Print full document if fullDocument is enabled
+                            if (fullDocument) {
+                                try {
+                                    // Use relaxed JSON mode to avoid unicode escaping
+                                    String jsonString = doc.toJson(org.bson.json.JsonWriterSettings.builder()
+                                        .outputMode(org.bson.json.JsonMode.RELAXED)
+                                        .build());
+                                    System.out.println(truncateDocumentFields(jsonString));
+                                } catch (Exception e) {
+                                    System.out.println("Error converting document to JSON: " + e.getMessage());
+                                }
                             }
                         }
                         
