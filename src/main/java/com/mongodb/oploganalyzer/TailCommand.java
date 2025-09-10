@@ -453,6 +453,28 @@ public class TailCommand implements Callable<Integer> {
                             continue;
                         }
                         
+                        // Print full document if it matches size filter and fullDocument is enabled
+                        if (fullDocument && (minSize != null || maxSize != null)) {
+                            BsonValue id = extractId(doc, opType);
+                            String idString = id != null ? getIdString(id) : "unknown";
+                            String sizeDisplay = org.apache.commons.io.FileUtils.byteCountToDisplaySize(docSize);
+                            
+                            if (shardId != null && !shardId.isEmpty()) {
+                                System.out.println(String.format("[%s] %s doc matched size filter (%s): {_id: %s }",
+                                    shardId, ns, sizeDisplay, idString));
+                            } else {
+                                System.out.println(String.format("%s doc matched size filter (%s): {_id: %s }",
+                                    ns, sizeDisplay, idString));
+                            }
+                            
+                            try {
+                                String jsonString = doc.toJson();
+                                System.out.println(truncateDocumentFields(jsonString));
+                            } catch (Exception e) {
+                                System.out.println("Error converting document to JSON: " + e.getMessage());
+                            }
+                        }
+                        
                         // Track global statistics
                         synchronized (this) {
                             totalBytesProcessed += docSize;
