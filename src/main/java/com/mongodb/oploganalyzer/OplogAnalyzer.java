@@ -10,7 +10,7 @@ import picocli.CommandLine.Spec;
 
 @Command(name = "oplog-analyzer", mixinStandardHelpOptions = true, version = "0.0.1-SNAPSHOT",
          description = "MongoDB Oplog Analyzer",
-         subcommands = {ScanCommand.class, TailCommand.class})
+         subcommands = {ScanCommand.class, TailCommand.class, SampleCommand.class, AnalyzeCommand.class})
 public class OplogAnalyzer implements Callable<Integer> {
 	
 	// Main command - no fields needed since all functionality is in subcommands

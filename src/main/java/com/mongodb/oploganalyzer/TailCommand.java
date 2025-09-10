@@ -19,12 +19,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import org.bson.BsonArray;
 import org.bson.BsonBinary;
@@ -91,6 +94,12 @@ public class TailCommand implements Callable<Integer> {
     @Option(names = {"--shardIndex"}, description = "Comma-separated list of shard indices to analyze (0,1,2...), default: all shards")
     private String shardIndexes;
     
+    @Option(names = {"--shardStats"}, description = "Show per-shard breakdown of statistics in the report")
+    private boolean shardStats = false;
+    
+    @Option(names = {"--thresholdBuckets"}, description = "Comma-separated list of byte thresholds for counting operations (e.g., 100000,1000000 for 100KB,1MB)", split = ",")
+    private List<Long> thresholdBuckets = new ArrayList<>();
+    
     private ShardClient shardClient;
     private boolean shutdown = false;
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new ConcurrentHashMap<OplogEntryKey, EntryAccumulator>();
@@ -103,6 +112,26 @@ public class TailCommand implements Callable<Integer> {
     private List<ShardTailWorker> workers = new java.util.ArrayList<>();
     private List<Map<OplogEntryKey, EntryAccumulator>> shardAccumulators = null;
     private volatile boolean resultsAlreadyMerged = false;
+    
+    // Per-shard statistics (when shardStats flag is enabled)
+    private Map<String, Map<OplogEntryKey, EntryAccumulator>> perShardStats = null;
+    
+    // Memory monitoring
+    private ScheduledExecutorService memoryMonitor = null;
+    private volatile long lastMemoryWarning = 0;
+    private static final long MEMORY_WARNING_INTERVAL = 30000; // 30 seconds between warnings
+    
+    // Global statistics for memory tracking
+    private volatile long totalBytesProcessed = 0;
+    private volatile long totalDocsProcessed = 0;
+    private volatile long largestDocSize = 0;
+    private volatile String largestDocNamespace = "";
+    
+    // Shutdown handling
+    private volatile int shutdownAttempts = 0;
+    private volatile long lastShutdownAttempt = 0;
+    private static final long SHUTDOWN_RESET_INTERVAL = 5000; // Reset counter after 5 seconds
+    private volatile boolean reportGenerated = false;
     
     static class IdStatistics {
         long count = 0;
@@ -186,6 +215,25 @@ public class TailCommand implements Callable<Integer> {
                     Thread.sleep(100);
                 } catch (InterruptedException e) {
                     break;
+                }
+            }
+        }
+        
+        public int getPendingUpdatesCount() {
+            return pendingUpdates.size();
+        }
+        
+        private void trackPerShardStats(String ns, String opType, long docSize) {
+            if (shardStats && perShardStats != null) {
+                Map<OplogEntryKey, EntryAccumulator> shardMap = perShardStats.get(shardId);
+                if (shardMap != null) {
+                    OplogEntryKey key = new OplogEntryKey(ns, opType);
+                    EntryAccumulator accum = shardMap.get(key);
+                    if (accum == null) {
+                        accum = new EntryAccumulator(key, thresholdBuckets);
+                        shardMap.put(key, accum);
+                    }
+                    accum.addExecution(docSize);
                 }
             }
         }
@@ -279,7 +327,7 @@ public class TailCommand implements Callable<Integer> {
             OplogEntryKey key = new OplogEntryKey(update.ns, opType);
             EntryAccumulator accum = targetAccumulators.get(key);
             if (accum == null) {
-                accum = new EntryAccumulator(key);
+                accum = new EntryAccumulator(key, thresholdBuckets);
                 targetAccumulators.put(key, accum);
             }
             accum.addExecution(actualSize);
@@ -307,10 +355,13 @@ public class TailCommand implements Callable<Integer> {
             OplogEntryKey key = new OplogEntryKey(ns, opType);
             EntryAccumulator accum = targetAccumulators.get(key);
             if (accum == null) {
-                accum = new EntryAccumulator(key);
+                accum = new EntryAccumulator(key, thresholdBuckets);
                 targetAccumulators.put(key, accum);
             }
             accum.addExecution(oplogSize);
+            
+            // Track per-shard stats if enabled
+            trackPerShardStats(ns, opType, oplogSize);
             
             // Check main threshold for debug reporting (using oplog size - not ideal but fast)
             if (oplogSize >= threshold) {
@@ -369,6 +420,16 @@ public class TailCommand implements Callable<Integer> {
 
                         long docSize = doc.getByteBuffer().remaining();
                         
+                        // Track global statistics
+                        synchronized (this) {
+                            totalBytesProcessed += docSize;
+                            totalDocsProcessed++;
+                            if (docSize > largestDocSize) {
+                                largestDocSize = docSize;
+                                largestDocNamespace = ns;
+                            }
+                        }
+                        
                         // Handle applyOps operations (transactions/bulk ops)
                         if ("c".equals(opType) && ns.endsWith(".$cmd")) {
                             BsonDocument o = (BsonDocument) doc.get("o");
@@ -384,11 +445,15 @@ public class TailCommand implements Callable<Integer> {
                                             OplogEntryKey innerKey = new OplogEntryKey(innerNs, innerOpType);
                                             EntryAccumulator innerAccum = targetAccumulators.get(innerKey);
                                             if (innerAccum == null) {
-                                                innerAccum = new EntryAccumulator(innerKey);
+                                                innerAccum = new EntryAccumulator(innerKey, thresholdBuckets);
                                                 targetAccumulators.put(innerKey, innerAccum);
                                             }
                                             // Use a portion of the total doc size for each nested op
-                                            innerAccum.addExecution(docSize / applyOps.size());
+                                            long innerDocSize = docSize / applyOps.size();
+                                            innerAccum.addExecution(innerDocSize);
+                                            
+                                            // Track per-shard stats if enabled
+                                            trackPerShardStats(innerNs, innerOpType, innerDocSize);
                                         }
                                     }
                                 }
@@ -423,10 +488,13 @@ public class TailCommand implements Callable<Integer> {
                             OplogEntryKey key = new OplogEntryKey(ns, opType);
                             EntryAccumulator accum = targetAccumulators.get(key);
                             if (accum == null) {
-                                accum = new EntryAccumulator(key);
+                                accum = new EntryAccumulator(key, thresholdBuckets);
                                 targetAccumulators.put(key, accum);
                             }
                             accum.addExecution(docSize);
+                            
+                            // Track per-shard stats if enabled
+                            trackPerShardStats(ns, opType, docSize);
                             
                             // Get the _id for both debug and statistics purposes
                             BsonDocument o = (BsonDocument) doc.get("o");
@@ -479,8 +547,8 @@ public class TailCommand implements Callable<Integer> {
                             }
                             
                             long lagSeconds = calculateLagSeconds(lastOplogTimestamp);
-                            logger.info("[{}] Processed {} entries, Lag: {}s", 
-                                shardId, String.format("%,d", count), lagSeconds);
+                            logger.info("[{}] Processed {} entries, Lag: {}s, {}", 
+                                shardId, String.format("%,d", count), lagSeconds, getMemoryStats());
                             lastReportTime = currentTime;
                         }
                         
@@ -525,32 +593,119 @@ public class TailCommand implements Callable<Integer> {
         try {
             initializeClient();
             setupShutdownHook();
+            startMemoryMonitoring();
             analyze();
             return 0;
         } catch (IOException e) {
             logger.error("Error analyzing oplog", e);
             return 1;
+        } finally {
+            stopMemoryMonitoring();
         }
     }
     
     private void setupShutdownHook() {
         if (limit == null) {
+            // First, add a regular shutdown hook for the initial Ctrl-C
             Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
                 public void run() {
-                    System.out.println();
-                    System.out.println("**** SHUTDOWN *****");
-                    stop();
-                    
-                    // If we have multi-threaded execution, stop workers and merge results
-                    if (workers != null && !workers.isEmpty()) {
-                        stopWorkers();
-                        mergeShardResults();
-                    }
-                    
-                    report();
+                    handleShutdown();
                 }
             }));
+            
+            // Also register a signal handler to track multiple Ctrl-C attempts
+            try {
+                sun.misc.Signal.handle(new sun.misc.Signal("INT"), signal -> {
+                    long now = System.currentTimeMillis();
+                    
+                    // Reset counter if it's been more than 5 seconds since last attempt
+                    if (now - lastShutdownAttempt > SHUTDOWN_RESET_INTERVAL) {
+                        shutdownAttempts = 0;
+                    }
+                    
+                    shutdownAttempts++;
+                    lastShutdownAttempt = now;
+                    
+                    if (shutdownAttempts == 1) {
+                        System.out.println("\n>>> Graceful shutdown initiated... (press Ctrl-C again to force quit)");
+                        // First attempt - graceful shutdown will be handled by shutdown hook
+                    } else if (shutdownAttempts == 2) {
+                        System.out.println("\n>>> Forcing shutdown... (press Ctrl-C once more for immediate termination)");
+                        forceShutdown();
+                    } else if (shutdownAttempts >= 3) {
+                        System.err.println("\n>>> IMMEDIATE TERMINATION!");
+                        Runtime.getRuntime().halt(1);
+                    }
+                });
+            } catch (IllegalArgumentException e) {
+                // Signal handling not supported on this platform
+                logger.debug("Signal handling not available: {}", e.getMessage());
+            }
         }
+    }
+    
+    private void handleShutdown() {
+        System.out.println();
+        System.out.println("**** SHUTDOWN *****");
+        stop();
+        
+        // If we have multi-threaded execution, stop workers and merge results
+        if (workers != null && !workers.isEmpty()) {
+            stopWorkers();
+            if (!resultsAlreadyMerged) {
+                mergeShardResults();
+            }
+        }
+        
+        // Only report if we haven't already reported
+        if (!reportGenerated) {
+            report();
+            reportGenerated = true;
+        }
+    }
+    
+    private void forceShutdown() {
+        // More aggressive shutdown - shorter timeouts
+        Thread forcedShutdown = new Thread(() -> {
+            try {
+                System.out.println("Forcing worker termination...");
+                
+                // Give workers only 2 seconds to stop gracefully
+                if (currentExecutor != null) {
+                    currentExecutor.shutdownNow();
+                    if (!currentExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
+                        System.err.println("Workers did not terminate in time!");
+                    }
+                }
+                
+                // Stop memory monitoring immediately
+                if (memoryMonitor != null) {
+                    memoryMonitor.shutdownNow();
+                }
+                
+                // Try to generate a quick report with whatever data we have
+                if (!resultsAlreadyMerged && shardAccumulators != null) {
+                    mergeShardResults();
+                }
+                if (!reportGenerated) {
+                    report();
+                    reportGenerated = true;
+                }
+                
+            } catch (Exception e) {
+                System.err.println("Error during forced shutdown: " + e.getMessage());
+            } finally {
+                // Exit after maximum 3 seconds
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    // Ignore
+                }
+                System.exit(1);
+            }
+        });
+        forcedShutdown.setDaemon(true);
+        forcedShutdown.start();
     }
     
     private void initializeClient() {
@@ -628,6 +783,11 @@ public class TailCommand implements Callable<Integer> {
         workers = new java.util.ArrayList<>();
         shardAccumulators = new java.util.ArrayList<>();
         
+        // Initialize per-shard stats if requested
+        if (shardStats) {
+            perShardStats = new ConcurrentHashMap<>();
+        }
+        
         // Create and start workers for each shard
         for (String shardId : targetShards) {
             MongoClient mongoClient = shardClients.get(shardId);
@@ -635,6 +795,11 @@ public class TailCommand implements Callable<Integer> {
             // Create separate accumulator for this shard - no contention!
             Map<OplogEntryKey, EntryAccumulator> shardAccumulator = new HashMap<>();
             shardAccumulators.add(shardAccumulator);
+            
+            // Initialize per-shard stats tracking
+            if (shardStats) {
+                perShardStats.put(shardId, new ConcurrentHashMap<>());
+            }
             
             ShardTailWorker worker = new ShardTailWorker(shardId, mongoClient, shardAccumulator);
             workers.add(worker);
@@ -659,20 +824,29 @@ public class TailCommand implements Callable<Integer> {
     }
     
     private void stopWorkers() {
-        logger.debug("Stopping {} workers gracefully", workers.size());
+        stopWorkers(5);  // Default 5 second timeout
+    }
+    
+    private void stopWorkers(int timeoutSeconds) {
+        logger.debug("Stopping {} workers with {}s timeout", workers.size(), timeoutSeconds);
         for (ShardTailWorker worker : workers) {
             worker.stop();
         }
         
         currentExecutor.shutdown();
         try {
-            if (!currentExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                logger.debug("Workers didn't terminate gracefully, forcing shutdown");
+            if (!currentExecutor.awaitTermination(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)) {
+                logger.warn("Workers did not terminate within {}s timeout, forcing shutdown", timeoutSeconds);
                 currentExecutor.shutdownNow();
+                // Give it one more second after shutdownNow
+                if (!currentExecutor.awaitTermination(1, java.util.concurrent.TimeUnit.SECONDS)) {
+                    logger.error("Workers still running after forced shutdown!");
+                }
             }
         } catch (InterruptedException e) {
-            logger.debug("Interrupted while waiting for workers to stop");
+            logger.warn("Interrupted while waiting for workers to stop");
             currentExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
         }
         
         logger.debug("All workers stopped");
@@ -706,14 +880,12 @@ public class TailCommand implements Callable<Integer> {
             
             EntryAccumulator globalAcc = accumulators.get(key);
             if (globalAcc == null) {
-                globalAcc = new EntryAccumulator(key);
+                globalAcc = new EntryAccumulator(key, thresholdBuckets);
                 accumulators.put(key, globalAcc);
             }
             
-            // Merge the accumulator data
-            for (long i = 0; i < shardAcc.getCount(); i++) {
-                globalAcc.addExecution(shardAcc.getTotal() / shardAcc.getCount());
-            }
+            // Merge the accumulator data properly
+            globalAcc.merge(shardAcc);
         }
         return totalEntries;
     }
@@ -922,15 +1094,196 @@ public class TailCommand implements Callable<Integer> {
         return ts;
     }
     
+    private void startMemoryMonitoring() {
+        memoryMonitor = Executors.newScheduledThreadPool(1);
+        memoryMonitor.scheduleAtFixedRate(() -> {
+            Runtime runtime = Runtime.getRuntime();
+            long maxMemory = runtime.maxMemory();
+            long totalMemory = runtime.totalMemory();
+            long freeMemory = runtime.freeMemory();
+            long usedMemory = totalMemory - freeMemory;
+            double usedPercent = (usedMemory * 100.0) / maxMemory;
+            
+            // Calculate data structure sizes
+            int totalAccumulators = 0;
+            int totalPendingUpdates = 0;
+            long cacheSize = 0;
+            
+            // Count accumulators across all shards
+            if (shardAccumulators != null) {
+                for (Map<OplogEntryKey, EntryAccumulator> shardAccum : shardAccumulators) {
+                    if (shardAccum != null) {
+                        totalAccumulators += shardAccum.size();
+                    }
+                }
+            }
+            // Main accumulator map
+            if (accumulators != null) {
+                totalAccumulators += accumulators.size();
+            }
+            
+            // Count pending updates across all workers
+            if (workers != null) {
+                for (ShardTailWorker worker : workers) {
+                    totalPendingUpdates += worker.getPendingUpdatesCount();
+                }
+            }
+            
+            // Cache size
+            if (idStatsCache != null) {
+                cacheSize = idStatsCache.estimatedSize();
+            }
+            
+            // Log memory stats every 5 seconds at DEBUG level with data structure info
+            logger.debug("Memory: Used={} MB ({}%), Free={} MB, Max={} MB | Accumulators={}, Cache={}, PendingUpdates={} | Docs={}, TotalBytes={} MB", 
+                usedMemory / (1024 * 1024),
+                String.format("%.1f", usedPercent),
+                freeMemory / (1024 * 1024),
+                maxMemory / (1024 * 1024),
+                totalAccumulators,
+                cacheSize,
+                totalPendingUpdates,
+                totalDocsProcessed,
+                totalBytesProcessed / (1024 * 1024));
+            
+            // Warn if memory usage is high (>80%)
+            if (usedPercent > 80) {
+                long now = System.currentTimeMillis();
+                if (now - lastMemoryWarning > MEMORY_WARNING_INTERVAL) {
+                    logger.warn("High memory usage: {}% ({} MB / {} MB). Consider increasing heap size with -Xmx", 
+                        String.format("%.1f", usedPercent),
+                        usedMemory / (1024 * 1024),
+                        maxMemory / (1024 * 1024));
+                    logger.warn("Data structures: Accumulators={}, IdStatsCache={}, PendingUpdates={}", 
+                        totalAccumulators, cacheSize, totalPendingUpdates);
+                    logger.warn("Processing stats: Docs={}, TotalBytes={} MB, LargestDoc={} KB in {}", 
+                        totalDocsProcessed, 
+                        totalBytesProcessed / (1024 * 1024),
+                        largestDocSize / 1024,
+                        largestDocNamespace);
+                    
+                    // Log top memory consumers if we have them
+                    if (totalAccumulators > 1000) {
+                        logger.warn("Large number of accumulators detected ({} entries). Consider using namespace filtering.", totalAccumulators);
+                    }
+                    if (cacheSize > 10000) {
+                        logger.warn("Large ID cache size ({} entries). Consider reducing --topIdCount or disabling --idStats.", cacheSize);
+                    }
+                    
+                    // Check if we're holding too many raw BSON documents
+                    long avgDocSize = totalDocsProcessed > 0 ? totalBytesProcessed / totalDocsProcessed : 0;
+                    if (avgDocSize > 100 * 1024) { // avg > 100KB
+                        logger.warn("Large average document size: {} KB. Consider filtering large namespaces.", avgDocSize / 1024);
+                    }
+                    lastMemoryWarning = now;
+                }
+            }
+            
+            // Critical memory usage (>95%) - log top namespaces and trigger GC
+            if (usedPercent > 95) {
+                logger.error("CRITICAL memory usage: {}%", String.format("%.1f", usedPercent));
+                
+                if (accumulators != null && !accumulators.isEmpty()) {
+                    logger.error("Top 5 namespaces by operation count:");
+                    accumulators.values().stream()
+                        .sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
+                        .limit(5)
+                        .forEach(acc -> logger.error("  {}: {} ops, total size: {} KB", 
+                            acc.getNamespace(), 
+                            acc.getCount(),
+                            acc.getTotal() / 1024));
+                }
+                
+                // Try to free memory by forcing GC
+                logger.warn("Attempting garbage collection due to critical memory usage...");
+                System.gc();
+                
+                // Re-check memory after GC
+                try {
+                    Thread.sleep(500); // Give GC time to run
+                } catch (InterruptedException e) {
+                    // Ignore
+                }
+                
+                Runtime postGcRuntime = Runtime.getRuntime();
+                long postGcUsed = postGcRuntime.totalMemory() - postGcRuntime.freeMemory();
+                double postGcPercent = (postGcUsed * 100.0) / postGcRuntime.maxMemory();
+                logger.info("Memory after GC: {}% ({} MB / {} MB)", 
+                    String.format("%.1f", postGcPercent),
+                    postGcUsed / (1024 * 1024),
+                    postGcRuntime.maxMemory() / (1024 * 1024));
+            }
+        }, 0, 5, TimeUnit.SECONDS);
+    }
+    
+    private void stopMemoryMonitoring() {
+        if (memoryMonitor != null) {
+            memoryMonitor.shutdown();
+            try {
+                if (!memoryMonitor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    memoryMonitor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                memoryMonitor.shutdownNow();
+            }
+        }
+    }
+    
+    private String getMemoryStats() {
+        Runtime runtime = Runtime.getRuntime();
+        long maxMemory = runtime.maxMemory();
+        long totalMemory = runtime.totalMemory();
+        long freeMemory = runtime.freeMemory();
+        long usedMemory = totalMemory - freeMemory;
+        double usedPercent = (usedMemory * 100.0) / maxMemory;
+        
+        return String.format("Mem: %.1f%% (%dMB/%dMB)", 
+            usedPercent, 
+            usedMemory / (1024 * 1024), 
+            maxMemory / (1024 * 1024));
+    }
+    
     public void report() {
         System.out.println();
-        System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", "Namespace", "op", "count", "min", "max",
-                "avg", "total (size)"));
+        System.out.println(EntryAccumulator.getHeaderFormat(thresholdBuckets));
         accumulators.values().stream().sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
                 .forEach(acc -> System.out.println(acc));
         
         if (idStats && !idStatsCache.asMap().isEmpty()) {
             printIdStatistics();
+        }
+        
+        if (shardStats && perShardStats != null && !perShardStats.isEmpty()) {
+            printPerShardStatistics();
+        }
+    }
+    
+    private void printPerShardStatistics() {
+        System.out.println();
+        System.out.println("=== PER-SHARD BREAKDOWN ===");
+        
+        // Sort shards by name for consistent output
+        List<String> sortedShards = perShardStats.keySet().stream().sorted().collect(Collectors.toList());
+        
+        for (String shardId : sortedShards) {
+            Map<OplogEntryKey, EntryAccumulator> shardAccumulatorMap = perShardStats.get(shardId);
+            if (shardAccumulatorMap != null && !shardAccumulatorMap.isEmpty()) {
+                System.out.println();
+                System.out.println(String.format("--- %s ---", shardId));
+                System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", "Namespace", "op", "count", "min", "max",
+                        "avg", "total (size)"));
+                
+                // Sort by operation count descending
+                shardAccumulatorMap.values().stream()
+                    .sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
+                    .forEach(acc -> System.out.println(acc));
+                
+                // Summary for this shard
+                long totalOps = shardAccumulatorMap.values().stream().mapToLong(EntryAccumulator::getCount).sum();
+                long totalBytes = shardAccumulatorMap.values().stream().mapToLong(EntryAccumulator::getTotal).sum();
+                System.out.println(String.format("Shard %s total: %,d operations, %s", 
+                    shardId, totalOps, org.apache.commons.io.FileUtils.byteCountToDisplaySize(totalBytes)));
+            }
         }
     }
     
