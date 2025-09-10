@@ -357,7 +357,7 @@ public class TailCommand implements Callable<Integer> {
             return pendingUpdates.size();
         }
         
-        private void trackPerShardStats(String ns, String opType, long docSize) {
+        private void trackPerShardStats(String ns, String opType, long docSize, DocumentStats docStats) {
             if (shardStats && perShardStats != null) {
                 Map<OplogEntryKey, EntryAccumulator> shardMap = perShardStats.get(shardId);
                 if (shardMap != null) {
@@ -367,8 +367,8 @@ public class TailCommand implements Callable<Integer> {
                         accum = new EntryAccumulator(key, thresholdBuckets);
                         shardMap.put(key, accum);
                     }
-                    // For per-shard aggregation, don't track individual document stats
-                    accum.addExecution(docSize);
+                    // For per-shard aggregation, track document stats as well
+                    accum.addExecution(docSize, docStats.totalElements, docStats.diffFields);
                 }
             }
         }
@@ -469,6 +469,9 @@ public class TailCommand implements Callable<Integer> {
             DocumentStats docStats = calculateDocumentStats(update.doc, "u");
             accum.addExecution(actualSize, docStats.totalElements, docStats.diffFields);
             
+            // Track per-shard stats if enabled
+            trackPerShardStats(update.ns, opType, actualSize, docStats);
+            
             // Check main threshold for debug reporting
             if (actualSize >= threshold) {
                 logThresholdExceeded(shardId, update.ns, "u", actualSize, update.doc);
@@ -500,7 +503,7 @@ public class TailCommand implements Callable<Integer> {
             accum.addExecution(oplogSize, docStats.totalElements, docStats.diffFields);
             
             // Track per-shard stats if enabled
-            trackPerShardStats(ns, opType, oplogSize);
+            trackPerShardStats(ns, opType, oplogSize, docStats);
             
             // Check main threshold for debug reporting (using oplog size - not ideal but fast)
             if (oplogSize >= threshold) {
@@ -651,7 +654,7 @@ public class TailCommand implements Callable<Integer> {
                                             innerAccum.addExecution(innerDocSize, innerStats.totalElements, innerStats.diffFields);
                                             
                                             // Track per-shard stats if enabled
-                                            trackPerShardStats(innerNs, innerOpType, innerDocSize);
+                                            trackPerShardStats(innerNs, innerOpType, innerDocSize, innerStats);
                                         }
                                     }
                                 }
@@ -694,7 +697,7 @@ public class TailCommand implements Callable<Integer> {
                             accum.addExecution(docSize, docStats.totalElements, docStats.diffFields);
                             
                             // Track per-shard stats if enabled
-                            trackPerShardStats(ns, opType, docSize);
+                            trackPerShardStats(ns, opType, docSize, docStats);
                             
                             // Get the _id for both debug and statistics purposes
                             BsonDocument o = (BsonDocument) doc.get("o");
