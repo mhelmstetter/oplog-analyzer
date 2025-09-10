@@ -226,7 +226,7 @@ public class TailCommand implements Callable<Integer> {
                     OplogEntryKey key = new OplogEntryKey(ns, opType);
                     EntryAccumulator accum = shardMap.get(key);
                     if (accum == null) {
-                        accum = new EntryAccumulator(key);
+                        accum = new EntryAccumulator(key, thresholdBuckets);
                         shardMap.put(key, accum);
                     }
                     accum.addExecution(docSize);
@@ -323,7 +323,7 @@ public class TailCommand implements Callable<Integer> {
             OplogEntryKey key = new OplogEntryKey(update.ns, opType);
             EntryAccumulator accum = targetAccumulators.get(key);
             if (accum == null) {
-                accum = new EntryAccumulator(key);
+                accum = new EntryAccumulator(key, thresholdBuckets);
                 targetAccumulators.put(key, accum);
             }
             accum.addExecution(actualSize);
@@ -351,7 +351,7 @@ public class TailCommand implements Callable<Integer> {
             OplogEntryKey key = new OplogEntryKey(ns, opType);
             EntryAccumulator accum = targetAccumulators.get(key);
             if (accum == null) {
-                accum = new EntryAccumulator(key);
+                accum = new EntryAccumulator(key, thresholdBuckets);
                 targetAccumulators.put(key, accum);
             }
             accum.addExecution(oplogSize);
@@ -441,7 +441,7 @@ public class TailCommand implements Callable<Integer> {
                                             OplogEntryKey innerKey = new OplogEntryKey(innerNs, innerOpType);
                                             EntryAccumulator innerAccum = targetAccumulators.get(innerKey);
                                             if (innerAccum == null) {
-                                                innerAccum = new EntryAccumulator(innerKey);
+                                                innerAccum = new EntryAccumulator(innerKey, thresholdBuckets);
                                                 targetAccumulators.put(innerKey, innerAccum);
                                             }
                                             // Use a portion of the total doc size for each nested op
@@ -484,7 +484,7 @@ public class TailCommand implements Callable<Integer> {
                             OplogEntryKey key = new OplogEntryKey(ns, opType);
                             EntryAccumulator accum = targetAccumulators.get(key);
                             if (accum == null) {
-                                accum = new EntryAccumulator(key);
+                                accum = new EntryAccumulator(key, thresholdBuckets);
                                 targetAccumulators.put(key, accum);
                             }
                             accum.addExecution(docSize);
@@ -876,14 +876,12 @@ public class TailCommand implements Callable<Integer> {
             
             EntryAccumulator globalAcc = accumulators.get(key);
             if (globalAcc == null) {
-                globalAcc = new EntryAccumulator(key);
+                globalAcc = new EntryAccumulator(key, thresholdBuckets);
                 accumulators.put(key, globalAcc);
             }
             
-            // Merge the accumulator data
-            for (long i = 0; i < shardAcc.getCount(); i++) {
-                globalAcc.addExecution(shardAcc.getTotal() / shardAcc.getCount());
-            }
+            // Merge the accumulator data properly
+            globalAcc.merge(shardAcc);
         }
         return totalEntries;
     }
