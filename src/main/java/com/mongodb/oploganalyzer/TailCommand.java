@@ -587,7 +587,10 @@ public class TailCommand implements Callable<Integer> {
                             }
                             
                             try {
-                                String jsonString = doc.toJson();
+                                // Use relaxed JSON mode to avoid unicode escaping
+                                String jsonString = doc.toJson(org.bson.json.JsonWriterSettings.builder()
+                                    .outputMode(org.bson.json.JsonMode.RELAXED)
+                                    .build());
                                 System.out.println(truncateDocumentFields(jsonString));
                             } catch (Exception e) {
                                 System.out.println("Error converting document to JSON: " + e.getMessage());
