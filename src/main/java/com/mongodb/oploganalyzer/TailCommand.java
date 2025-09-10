@@ -119,7 +119,7 @@ public class TailCommand implements Callable<Integer> {
     private boolean shutdown = false;
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new ConcurrentHashMap<OplogEntryKey, EntryAccumulator>();
 
-    FileChannel channel;
+    // FileChannel removed - now handled per-shard in ShardTailWorker
     private Cache<String, IdStatistics> idStatsCache;
     
     // For tracking multi-threaded execution using worker pattern
@@ -213,10 +213,22 @@ public class TailCommand implements Callable<Integer> {
         private static final int MAX_BATCH_SIZE = 10;
         private static final long BATCH_TIMEOUT_MS = 100; // 100ms timeout
         
+        // Per-shard dump file channel
+        private FileChannel shardChannel = null;
+        
         public ShardTailWorker(String shardId, MongoClient mongoClient, Map<OplogEntryKey, EntryAccumulator> targetAccumulators) {
             this.shardId = shardId;
             this.mongoClient = mongoClient;
             this.targetAccumulators = targetAccumulators;
+            
+            // Initialize shard-specific dump file if needed
+            if (dump) {
+                try {
+                    initShardDumpFile();
+                } catch (IOException e) {
+                    logger.error("[{}] Failed to initialize dump file: {}", shardId, e.getMessage());
+                }
+            }
         }
         
         public void start() {
@@ -230,6 +242,32 @@ public class TailCommand implements Callable<Integer> {
                     Thread.sleep(100);
                 } catch (InterruptedException e) {
                     break;
+                }
+            }
+            // Close the shard dump file channel if open
+            if (shardChannel != null) {
+                try {
+                    shardChannel.close();
+                } catch (IOException e) {
+                    logger.error("[{}] Error closing dump file channel: {}", shardId, e.getMessage());
+                }
+            }
+        }
+        
+        private void initShardDumpFile() throws IOException {
+            String fileName = String.format("oplog_%s_%s.bson", shardId, dateFormat.format(new java.util.Date()));
+            FileOutputStream outputStream = new FileOutputStream(fileName);
+            shardChannel = outputStream.getChannel();
+            System.out.println(String.format("[%s] Dumping to file: %s", shardId, fileName));
+        }
+        
+        private void writeShardDump(RawBsonDocument doc) {
+            if (shardChannel != null) {
+                try {
+                    ByteBuffer buffer = doc.getByteBuffer().asNIO();
+                    shardChannel.write(buffer);
+                } catch (Exception e) {
+                    logger.error("[{}] Error writing dump: {}", shardId, e.getMessage());
                 }
             }
         }
@@ -361,7 +399,7 @@ public class TailCommand implements Callable<Integer> {
             
             // Handle dump if needed
             if (dump) {
-                writeDump(update.doc);
+                writeShardDump(update.doc);
             }
         }
         
@@ -393,7 +431,7 @@ public class TailCommand implements Callable<Integer> {
             
             // Handle dump if needed
             if (dump) {
-                writeDump(doc);
+                writeShardDump(doc);
             }
         }
         
@@ -588,7 +626,7 @@ public class TailCommand implements Callable<Integer> {
                             }
                             
                             if (dump) {
-                                writeDump(doc);
+                                writeShardDump(doc);
                             }
                         }
                         
@@ -777,9 +815,7 @@ public class TailCommand implements Callable<Integer> {
     }
     
     public void analyze() throws IOException {
-        if (dump) {
-            initDumpFile();
-        }
+        // Note: dump file initialization is now handled per-shard in ShardTailWorker
 
         if (shardClient.isMongos()) {
             System.out.println("Detected sharded cluster - tailing all shards simultaneously");
@@ -1207,24 +1243,7 @@ public class TailCommand implements Callable<Integer> {
         return ns + "::" + id;
     }
     
-    private void initDumpFile() throws IOException {
-        String fileName = String.format("oplog_%s.bson", dateFormat.format(new java.util.Date()));
-        try (FileOutputStream outputStream = new FileOutputStream(fileName)) {
-			channel = outputStream.getChannel();
-		} catch (FileNotFoundException e) {
-			throw e;
-		}
-        System.out.println("Dumping to file: " + fileName);
-    }
-    
-    private void writeDump(RawBsonDocument doc) {
-        try {
-            ByteBuffer buffer = doc.getByteBuffer().asNIO();
-            channel.write(buffer);
-        } catch (Exception e) {
-            logger.error("Error writing dump", e);
-        }
-    }
+    // Dump file handling moved to ShardTailWorker for per-shard files
     
     private BsonTimestamp getLatestOplogTimestamp(MongoClient mongoClient) {
         MongoCollection<Document> coll = mongoClient.getDatabase("local").getCollection("oplog.rs");
