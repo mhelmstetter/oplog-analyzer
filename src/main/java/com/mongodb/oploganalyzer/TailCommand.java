@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -95,6 +96,9 @@ public class TailCommand implements Callable<Integer> {
     
     @Option(names = {"--shardStats"}, description = "Show per-shard breakdown of statistics in the report")
     private boolean shardStats = false;
+    
+    @Option(names = {"--thresholdBuckets"}, description = "Comma-separated list of byte thresholds for counting operations (e.g., 100000,1000000 for 100KB,1MB)", split = ",")
+    private List<Long> thresholdBuckets = new ArrayList<>();
     
     private ShardClient shardClient;
     private boolean shutdown = false;
@@ -1241,8 +1245,7 @@ public class TailCommand implements Callable<Integer> {
     
     public void report() {
         System.out.println();
-        System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", "Namespace", "op", "count", "min", "max",
-                "avg", "total (size)"));
+        System.out.println(EntryAccumulator.getHeaderFormat(thresholdBuckets));
         accumulators.values().stream().sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
                 .forEach(acc -> System.out.println(acc));
         

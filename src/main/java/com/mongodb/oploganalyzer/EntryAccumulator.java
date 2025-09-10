@@ -2,6 +2,8 @@ package com.mongodb.oploganalyzer;
 
 import org.apache.commons.io.FileUtils;
 import java.text.NumberFormat;
+import java.util.List;
+import java.util.ArrayList;
 import java.util.Locale;
 
 public class EntryAccumulator {
@@ -13,8 +15,21 @@ public class EntryAccumulator {
     private long min = Long.MAX_VALUE;
     private long max = Long.MIN_VALUE;
     
+    private List<Long> thresholdBuckets;
+    private List<Long> thresholdCounts;
+    
     public EntryAccumulator(OplogEntryKey key) {
+        this(key, new ArrayList<>());
+    }
+    
+    public EntryAccumulator(OplogEntryKey key, List<Long> thresholdBuckets) {
         this.key = key;
+        this.thresholdBuckets = new ArrayList<>(thresholdBuckets);
+        this.thresholdCounts = new ArrayList<>();
+        // Initialize threshold counts to 0
+        for (int i = 0; i < thresholdBuckets.size(); i++) {
+            this.thresholdCounts.add(0L);
+        }
     }
 
     public void addExecution(long amt) {
@@ -26,6 +41,13 @@ public class EntryAccumulator {
         if (amt < min) {
             min = amt;
         }
+        
+        // Update threshold bucket counts
+        for (int i = 0; i < thresholdBuckets.size(); i++) {
+            if (amt > thresholdBuckets.get(i)) {
+                thresholdCounts.set(i, thresholdCounts.get(i) + 1);
+            }
+        }
     }
     
     public String toString() {
@@ -33,14 +55,37 @@ public class EntryAccumulator {
         String totalWithSize = String.format("%s (%s)", 
             nf.format(total), 
             FileUtils.byteCountToDisplaySize(total));
-        return String.format("%-80s %5s %15s %15s %15s %15s %30s", 
+        
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("%-80s %5s %15s %15s %15s %15s %30s", 
             key.ns, 
             key.op, 
             nf.format(count), 
             nf.format(min), 
             nf.format(max), 
             nf.format(total/count), 
-            totalWithSize);
+            totalWithSize));
+        
+        // Add threshold bucket columns
+        for (Long thresholdCount : thresholdCounts) {
+            sb.append(String.format(" %15s", nf.format(thresholdCount)));
+        }
+        
+        return sb.toString();
+    }
+    
+    public static String getHeaderFormat(List<Long> thresholdBuckets) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("%-80s %5s %15s %15s %15s %15s %30s", 
+            "Namespace", "op", "count", "min", "max", "avg", "total (size)"));
+        
+        // Add threshold bucket headers
+        for (Long threshold : thresholdBuckets) {
+            String thresholdLabel = String.format("> %s", FileUtils.byteCountToDisplaySize(threshold));
+            sb.append(String.format(" %15s", thresholdLabel));
+        }
+        
+        return sb.toString();
     }
 
     public long getCount() {
