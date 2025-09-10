@@ -103,6 +103,9 @@ public class TailCommand implements Callable<Integer> {
     @Option(names = {"--includeNamespace"}, description = "Only process operations for these namespaces (can be specified multiple times)", arity = "1..*")
     private List<String> includeNamespaces = new ArrayList<>();
     
+    @Option(names = {"--op"}, description = "Only process these operation types (comma-separated: i,u,d,c)", split = ",")
+    private List<String> includeOperations = new ArrayList<>();
+    
     private ShardClient shardClient;
     private boolean shutdown = false;
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new ConcurrentHashMap<OplogEntryKey, EntryAccumulator>();
@@ -425,6 +428,11 @@ public class TailCommand implements Callable<Integer> {
                         if (!includeNamespaces.isEmpty() && !includeNamespaces.contains(ns)) {
                             continue;
                         }
+                        
+                        // Filter by included operation types if specified
+                        if (!includeOperations.isEmpty() && !includeOperations.contains(opType)) {
+                            continue;
+                        }
 
                         long docSize = doc.getByteBuffer().remaining();
                         
@@ -450,7 +458,8 @@ public class TailCommand implements Callable<Integer> {
                                         String innerOpType = innerOp.getString("op", new BsonString("unknown")).getValue();
                                         
                                         if (!innerNs.startsWith("config.") && 
-                                            (includeNamespaces.isEmpty() || includeNamespaces.contains(innerNs))) {
+                                            (includeNamespaces.isEmpty() || includeNamespaces.contains(innerNs)) &&
+                                            (includeOperations.isEmpty() || includeOperations.contains(innerOpType))) {
                                             OplogEntryKey innerKey = new OplogEntryKey(innerNs, innerOpType);
                                             EntryAccumulator innerAccum = targetAccumulators.get(innerKey);
                                             if (innerAccum == null) {

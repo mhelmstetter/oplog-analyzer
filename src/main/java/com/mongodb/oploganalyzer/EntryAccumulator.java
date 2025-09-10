@@ -57,15 +57,18 @@ public class EntryAccumulator {
     public String toString(int namespaceWidth) {
         NumberFormat nf = NumberFormat.getInstance(Locale.US);
         String totalSize = FileUtils.byteCountToDisplaySize(total);
+        String minSize = formatSizeWithPrecision(min);
+        String maxSize = formatSizeWithPrecision(max);
+        String avgSize = formatSizeWithPrecision(total/count);
         
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %12s", 
             truncateNamespace(key.ns, namespaceWidth), 
             key.op, 
             nf.format(count), 
-            nf.format(min), 
-            nf.format(max), 
-            nf.format(total/count), 
+            minSize, 
+            maxSize, 
+            avgSize, 
             totalSize));
         
         // Add threshold bucket columns
@@ -87,6 +90,18 @@ public class EntryAccumulator {
             return namespace.substring(0, maxWidth - 3) + "...";
         }
         return namespace.substring(0, keepStart) + "..." + namespace.substring(namespace.length() - keepEnd);
+    }
+    
+    private String formatSizeWithPrecision(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        } else if (bytes < 1024 * 1024) {
+            return String.format("%.1f KB", bytes / 1024.0);
+        } else if (bytes < 1024 * 1024 * 1024) {
+            return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
+        } else {
+            return String.format("%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+        }
     }
     
     public static String getHeaderFormat(List<Long> thresholdBuckets) {
