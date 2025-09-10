@@ -578,12 +578,35 @@ public class TailCommand implements Callable<Integer> {
                             String idString = id != null ? getIdString(id) : "unknown";
                             String sizeDisplay = org.apache.commons.io.FileUtils.byteCountToDisplaySize(docSize);
                             
+                            // Calculate diff summary if this is an update operation
+                            String diffSummary = "";
+                            if ("u".equals(opType)) {
+                                BsonDocument o = (BsonDocument) doc.get("o");
+                                if (o != null && o.containsKey("diff")) {
+                                    BsonValue diffValue = o.get("diff");
+                                    if (diffValue != null && diffValue.isDocument()) {
+                                        BsonDocument diff = diffValue.asDocument();
+                                        int totalFields = diff.size();
+                                        int totalElements = 0;
+                                        for (String key : diff.keySet()) {
+                                            BsonValue fieldValue = diff.get(key);
+                                            if (fieldValue.isDocument()) {
+                                                totalElements += countBsonElements(fieldValue.asDocument());
+                                            } else if (fieldValue.isArray()) {
+                                                totalElements += countBsonArrayElements(fieldValue.asArray());
+                                            }
+                                        }
+                                        diffSummary = String.format(", %d diff fields, %d total elements", totalFields, totalElements);
+                                    }
+                                }
+                            }
+                            
                             if (shardId != null && !shardId.isEmpty()) {
-                                System.out.println(String.format("[%s] %s doc matched size filter (%s): {_id: %s }",
-                                    shardId, ns, sizeDisplay, idString));
+                                System.out.println(String.format("[%s] %s doc matched size filter (%s%s): {_id: %s }",
+                                    shardId, ns, sizeDisplay, diffSummary, idString));
                             } else {
-                                System.out.println(String.format("%s doc matched size filter (%s): {_id: %s }",
-                                    ns, sizeDisplay, idString));
+                                System.out.println(String.format("%s doc matched size filter (%s%s): {_id: %s }",
+                                    ns, sizeDisplay, diffSummary, idString));
                             }
                             
                             // Print full document if fullDocument is enabled
@@ -1221,6 +1244,39 @@ public class TailCommand implements Callable<Integer> {
             }
             // For primitive values, leave them as-is since they're already small
         }
+    }
+    
+    /**
+     * Count total number of elements in a BSON document recursively
+     */
+    private int countBsonElements(BsonDocument doc) {
+        int count = 0;
+        for (String key : doc.keySet()) {
+            count++; // Count the field itself
+            BsonValue value = doc.get(key);
+            if (value.isDocument()) {
+                count += countBsonElements(value.asDocument());
+            } else if (value.isArray()) {
+                count += countBsonArrayElements(value.asArray());
+            }
+        }
+        return count;
+    }
+    
+    /**
+     * Count total number of elements in a BSON array recursively
+     */
+    private int countBsonArrayElements(BsonArray arr) {
+        int count = 0;
+        for (BsonValue value : arr) {
+            count++; // Count the array item itself
+            if (value.isDocument()) {
+                count += countBsonElements(value.asDocument()) - 1; // Subtract 1 to avoid double-counting
+            } else if (value.isArray()) {
+                count += countBsonArrayElements(value.asArray()) - 1; // Subtract 1 to avoid double-counting
+            }
+        }
+        return count;
     }
     
     /**
