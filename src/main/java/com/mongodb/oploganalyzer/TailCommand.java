@@ -9,6 +9,7 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.RandomAccessFile;
 import java.io.IOException;
+import java.util.zip.GZIPOutputStream;
 import java.io.StringWriter;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
@@ -121,6 +122,9 @@ public class TailCommand implements Callable<Integer> {
     private ShardClient shardClient;
     private boolean shutdown = false;
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new ConcurrentHashMap<OplogEntryKey, EntryAccumulator>();
+    
+    // Global timestamp for all dump files to prevent filename changes during run
+    private final String sessionTimestamp = dateFormat.format(new java.util.Date());
 
     // FileChannel removed - now handled per-shard in ShardTailWorker
     private Cache<String, IdStatistics> idStatsCache;
@@ -216,9 +220,9 @@ public class TailCommand implements Callable<Integer> {
         private static final int MAX_BATCH_SIZE = 10;
         private static final long BATCH_TIMEOUT_MS = 100; // 100ms timeout
         
-        // Per-shard dump file using RandomAccessFile for more reliable file handling
-        private RandomAccessFile shardDumpFile = null;
-        private FileChannel shardChannel = null;
+        // Per-shard dump file using GZIP compression
+        private FileOutputStream shardFileStream = null;
+        private GZIPOutputStream shardGzipStream = null;
         private long dumpWriteCount = 0;
         
         public ShardTailWorker(String shardId, MongoClient mongoClient, Map<OplogEntryKey, EntryAccumulator> targetAccumulators) {
@@ -232,8 +236,9 @@ public class TailCommand implements Callable<Integer> {
                     initShardDumpFile();
                 } catch (IOException e) {
                     logger.error("[{}] Failed to initialize dump file", shardId, e);
-                    // Set channel to null to prevent further write attempts
-                    shardChannel = null;
+                    // Set streams to null to prevent further write attempts
+                    shardGzipStream = null;
+                    shardFileStream = null;
                 }
             }
         }
@@ -252,10 +257,11 @@ public class TailCommand implements Callable<Integer> {
                 }
             }
             // Flush and close the shard dump file properly
-            if (shardChannel != null && shardChannel.isOpen()) {
+            if (shardGzipStream != null) {
                 try {
-                    // Force any remaining data to disk before closing
-                    shardChannel.force(true);
+                    // Flush any remaining data before closing
+                    shardGzipStream.flush();
+                    shardFileStream.flush();
                     logger.debug("[{}] Flushed and closing dump file after {} writes", shardId, dumpWriteCount);
                 } catch (IOException e) {
                     logger.debug("[{}] Error flushing dump file", shardId, e);
@@ -265,17 +271,13 @@ public class TailCommand implements Callable<Integer> {
         }
         
         private void initShardDumpFile() throws IOException {
-            String fileName = String.format("oplog_%s_%s.bson", shardId, dateFormat.format(new java.util.Date()));
+            String fileName = String.format("oplog_%s_%s.bson.gz", shardId, sessionTimestamp);
             try {
-                // Use RandomAccessFile for more reliable file handling
-                shardDumpFile = new RandomAccessFile(fileName, "rw");
-                shardChannel = shardDumpFile.getChannel();
+                // Use GZIP compressed output
+                shardFileStream = new FileOutputStream(fileName, false);
+                shardGzipStream = new GZIPOutputStream(shardFileStream, 8192); // 8KB buffer
                 
-                // Ensure we're at the beginning of the file
-                shardChannel.position(0);
-                
-                System.out.println(String.format("[%s] Dumping to file: %s (channel open: %s)", 
-                    shardId, fileName, shardChannel.isOpen()));
+                System.out.println(String.format("[%s] Dumping to compressed file: %s", shardId, fileName));
             } catch (IOException e) {
                 logger.error("[{}] Failed to create dump file: {}", shardId, fileName, e);
                 throw e;
@@ -288,27 +290,26 @@ public class TailCommand implements Callable<Integer> {
                 return;
             }
             
-            if (shardChannel != null && shardChannel.isOpen()) {
+            if (shardGzipStream != null) {
                 try {
                     ByteBuffer buffer = doc.getByteBuffer().asNIO();
-                    shardChannel.write(buffer);
+                    byte[] bytes = new byte[buffer.remaining()];
+                    buffer.get(bytes);
+                    shardGzipStream.write(bytes);
                     dumpWriteCount++;
                     
-                    // Periodically force data to disk to prevent data loss
+                    // Periodically flush data to prevent data loss
                     if (dumpWriteCount % 100 == 0) {
-                        shardChannel.force(false);
+                        shardGzipStream.flush();
+                        shardFileStream.flush();
                     }
-                } catch (ClosedByInterruptException e) {
-                    // Thread was interrupted during write - this is expected during shutdown
-                    logger.debug("[{}] Dump write interrupted during shutdown after {} writes", shardId, dumpWriteCount);
-                    closeShardDumpFile();
-                } catch (ClosedChannelException e) {
-                    // Channel was closed for another reason
-                    logger.error("[{}] Dump file channel closed unexpectedly after {} writes, disabling dump", 
-                        shardId, dumpWriteCount, e);
-                    closeShardDumpFile();
                 } catch (Exception e) {
-                    logger.error("[{}] Error writing dump after {} writes", shardId, dumpWriteCount, e);
+                    if (Thread.currentThread().isInterrupted()) {
+                        // Thread was interrupted during write - this is expected during shutdown
+                        logger.debug("[{}] Dump write interrupted during shutdown after {} writes", shardId, dumpWriteCount);
+                    } else {
+                        logger.error("[{}] Error writing dump after {} writes", shardId, dumpWriteCount, e);
+                    }
                     closeShardDumpFile();
                 }
             }
@@ -316,14 +317,21 @@ public class TailCommand implements Callable<Integer> {
         
         private void closeShardDumpFile() {
             try {
-                if (shardDumpFile != null) {
-                    shardDumpFile.close();
+                if (shardGzipStream != null) {
+                    shardGzipStream.close();
                 }
             } catch (IOException e) {
                 // Ignore close errors
             }
-            shardChannel = null;
-            shardDumpFile = null;
+            try {
+                if (shardFileStream != null) {
+                    shardFileStream.close();
+                }
+            } catch (IOException e) {
+                // Ignore close errors
+            }
+            shardGzipStream = null;
+            shardFileStream = null;
         }
         
         public int getPendingUpdatesCount() {
