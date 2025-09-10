@@ -1021,7 +1021,7 @@ public class TailCommand implements Callable<Integer> {
     }
     
     /**
-     * Truncate o.diff field contents to avoid overwhelming output
+     * Truncate o.diff field contents and filter out transaction fields to avoid overwhelming output
      */
     private String truncateDocumentFields(String jsonString) {
         try {
@@ -1032,6 +1032,13 @@ public class TailCommand implements Callable<Integer> {
             if (element.isJsonObject()) {
                 com.google.gson.JsonObject rootObj = element.getAsJsonObject();
                 
+                // Remove transaction-related fields that clutter the output
+                rootObj.remove("lsid");
+                rootObj.remove("uid");
+                rootObj.remove("txnNumber");
+                rootObj.remove("stmtId");
+                rootObj.remove("prevOpTime");
+                
                 // Check if this has an 'o' field (operation field)
                 if (rootObj.has("o") && rootObj.get("o").isJsonObject()) {
                     com.google.gson.JsonObject oField = rootObj.getAsJsonObject("o");
@@ -1040,9 +1047,8 @@ public class TailCommand implements Callable<Integer> {
                     if (oField.has("$v") && oField.has("diff") && oField.get("diff").isJsonObject()) {
                         com.google.gson.JsonObject diffField = oField.getAsJsonObject("diff");
                         
-                        // Replace diff content with a summary
-                        String summary = generateDiffSummary(diffField);
-                        oField.addProperty("diff", "... diff content truncated: " + summary + " ...");
+                        // Replace each diff field's content with a summary
+                        truncateDiffFields(diffField);
                     }
                 }
             }
@@ -1057,15 +1063,35 @@ public class TailCommand implements Callable<Integer> {
         }
     }
     
-    private String generateDiffSummary(com.google.gson.JsonObject diffObj) {
-        java.util.List<String> operations = new java.util.ArrayList<>();
-        
-        if (diffObj.has("u")) operations.add("updates");
-        if (diffObj.has("i")) operations.add("inserts"); 
-        if (diffObj.has("d")) operations.add("deletes");
-        if (diffObj.has("s")) operations.add("sets");
-        
-        return operations.isEmpty() ? "field changes" : String.join(", ", operations);
+    /**
+     * Recursively traverse diff fields and replace content with element/size summaries
+     */
+    private void truncateDiffFields(com.google.gson.JsonObject diffObj) {
+        for (String key : diffObj.keySet()) {
+            com.google.gson.JsonElement element = diffObj.get(key);
+            if (element.isJsonObject()) {
+                com.google.gson.JsonObject obj = element.getAsJsonObject();
+                int elementCount = obj.size();
+                
+                // Estimate size based on JSON string length (rough approximation)
+                String jsonStr = obj.toString();
+                int estimatedBytes = jsonStr.getBytes().length;
+                
+                // Replace with summary
+                diffObj.addProperty(key, String.format("<doc: %d elements, %d bytes>", elementCount, estimatedBytes));
+            } else if (element.isJsonArray()) {
+                com.google.gson.JsonArray arr = element.getAsJsonArray();
+                int elementCount = arr.size();
+                
+                // Estimate size based on JSON string length
+                String jsonStr = arr.toString();
+                int estimatedBytes = jsonStr.getBytes().length;
+                
+                // Replace with summary
+                diffObj.addProperty(key, String.format("<array: %d elements, %d bytes>", elementCount, estimatedBytes));
+            }
+            // For primitive values, leave them as-is since they're already small
+        }
     }
     
     /**
