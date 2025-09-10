@@ -73,6 +73,15 @@ public class TailCommand implements Callable<Integer> {
     @Option(names = {"-t", "--threshold"}, description = "Log operations >= this size (bytes)")
     private Long threshold = Long.MAX_VALUE;
     
+    @Option(names = {"--minSize"}, description = "Only process operations >= this size (bytes)")
+    private Long minSize = null;
+    
+    @Option(names = {"--maxSize"}, description = "Only process operations <= this size (bytes)")
+    private Long maxSize = null;
+    
+    @Option(names = {"--fullDocument"}, description = "Print full document content when operations exceed threshold")
+    private boolean fullDocument = false;
+    
     @Option(names = {"-l", "--limit"}, description = "Only examine limit number of oplog entries")
     private Integer limit = null;
     
@@ -435,6 +444,14 @@ public class TailCommand implements Callable<Integer> {
                         }
 
                         long docSize = doc.getByteBuffer().remaining();
+                        
+                        // Filter by size range if specified
+                        if (minSize != null && docSize < minSize) {
+                            continue;
+                        }
+                        if (maxSize != null && docSize > maxSize) {
+                            continue;
+                        }
                         
                         // Track global statistics
                         synchronized (this) {
@@ -969,6 +986,64 @@ public class TailCommand implements Callable<Integer> {
             System.out.println(String.format("%s doc exceeded threshold (%s): {_id: %s }",
                 ns, sizeDisplay, idString));
         }
+        
+        // Print full document if requested
+        if (fullDocument) {
+            try {
+                String jsonString = doc.toJson();
+                System.out.println(truncateDocumentFields(jsonString));
+            } catch (Exception e) {
+                System.out.println("Error converting document to JSON: " + e.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * Truncate o.diff field contents to avoid overwhelming output
+     */
+    private String truncateDocumentFields(String jsonString) {
+        try {
+            // Parse the JSON to inspect and modify o.diff fields
+            com.google.gson.JsonParser parser = new com.google.gson.JsonParser();
+            com.google.gson.JsonElement element = parser.parse(jsonString);
+            
+            if (element.isJsonObject()) {
+                com.google.gson.JsonObject rootObj = element.getAsJsonObject();
+                
+                // Check if this has an 'o' field (operation field)
+                if (rootObj.has("o") && rootObj.get("o").isJsonObject()) {
+                    com.google.gson.JsonObject oField = rootObj.getAsJsonObject("o");
+                    
+                    // Check if 'o' has '$v' and 'diff' (indicating a diff-based update)
+                    if (oField.has("$v") && oField.has("diff") && oField.get("diff").isJsonObject()) {
+                        com.google.gson.JsonObject diffField = oField.getAsJsonObject("diff");
+                        
+                        // Replace diff content with a summary
+                        String summary = generateDiffSummary(diffField);
+                        oField.addProperty("diff", "... diff content truncated: " + summary + " ...");
+                    }
+                }
+            }
+            
+            // Convert back to compact JSON string (no pretty printing)
+            com.google.gson.Gson gson = new com.google.gson.Gson();
+            return gson.toJson(element);
+            
+        } catch (Exception e) {
+            // If JSON parsing fails, return original string
+            return jsonString;
+        }
+    }
+    
+    private String generateDiffSummary(com.google.gson.JsonObject diffObj) {
+        java.util.List<String> operations = new java.util.ArrayList<>();
+        
+        if (diffObj.has("u")) operations.add("updates");
+        if (diffObj.has("i")) operations.add("inserts"); 
+        if (diffObj.has("d")) operations.add("deletes");
+        if (diffObj.has("s")) operations.add("sets");
+        
+        return operations.isEmpty() ? "field changes" : String.join(", ", operations);
     }
     
     /**
