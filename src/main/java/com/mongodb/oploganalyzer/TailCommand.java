@@ -1173,8 +1173,10 @@ public class TailCommand implements Callable<Integer> {
                 }
             }
             
-            // Convert back to compact JSON string (no pretty printing)
-            com.google.gson.Gson gson = new com.google.gson.Gson();
+            // Convert back to compact JSON string with disabled HTML escaping
+            com.google.gson.Gson gson = new com.google.gson.GsonBuilder()
+                .disableHtmlEscaping()
+                .create();
             return gson.toJson(element);
             
         } catch (Exception e) {
