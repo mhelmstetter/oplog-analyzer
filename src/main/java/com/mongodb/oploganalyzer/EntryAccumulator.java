@@ -18,6 +18,12 @@ public class EntryAccumulator {
     private List<Long> thresholdBuckets;
     private List<Long> thresholdCounts;
     
+    // Element and diff field tracking
+    private long totalElements = 0;
+    private long totalDiffFields = 0;
+    private long documentsWithElements = 0;
+    private long documentsWithDiff = 0;
+    
     public EntryAccumulator(OplogEntryKey key) {
         this(key, new ArrayList<>());
     }
@@ -33,6 +39,10 @@ public class EntryAccumulator {
     }
 
     public void addExecution(long amt) {
+        addExecution(amt, 0, 0);
+    }
+    
+    public void addExecution(long amt, int elementCount, int diffFieldCount) {
         count++;
         total += amt;
         if (amt > max) {
@@ -40,6 +50,16 @@ public class EntryAccumulator {
         }
         if (amt < min) {
             min = amt;
+        }
+        
+        // Track element and diff field statistics
+        if (elementCount > 0) {
+            totalElements += elementCount;
+            documentsWithElements++;
+        }
+        if (diffFieldCount > 0) {
+            totalDiffFields += diffFieldCount;
+            documentsWithDiff++;
         }
         
         // Update threshold bucket counts
@@ -70,6 +90,21 @@ public class EntryAccumulator {
             maxSize, 
             avgSize, 
             totalSize));
+        
+        // Add element and diff field statistics
+        if (documentsWithElements > 0) {
+            double avgElements = (double) totalElements / documentsWithElements;
+            sb.append(String.format(" %10.1f", avgElements));
+        } else {
+            sb.append(String.format(" %10s", "N/A"));
+        }
+        
+        if (documentsWithDiff > 0) {
+            double avgDiffFields = (double) totalDiffFields / documentsWithDiff;
+            sb.append(String.format(" %10.1f", avgDiffFields));
+        } else {
+            sb.append(String.format(" %10s", "N/A"));
+        }
         
         // Add threshold bucket columns
         for (Long thresholdCount : thresholdCounts) {
@@ -113,6 +148,9 @@ public class EntryAccumulator {
         sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %12s", 
             "Namespace", "op", "count", "min", "max", "avg", "total size"));
         
+        // Add element and diff field headers
+        sb.append(String.format(" %10s %10s", "avg elems", "avg diffs"));
+        
         // Add threshold bucket headers
         for (Long threshold : thresholdBuckets) {
             String thresholdLabel = String.format("> %s", FileUtils.byteCountToDisplaySize(threshold));
@@ -126,6 +164,9 @@ public class EntryAccumulator {
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %12s", 
             "=".repeat(namespaceWidth), "==", "==========", "==========", "==========", "==========", "============"));
+        
+        // Add element and diff field separators
+        sb.append(String.format(" %10s %10s", "==========", "=========="));
         
         // Add threshold bucket separators
         for (Long threshold : thresholdBuckets) {
@@ -171,6 +212,12 @@ public class EntryAccumulator {
         this.total += other.total;
         this.min = Math.min(this.min, other.min);
         this.max = Math.max(this.max, other.max);
+        
+        // Merge element and diff field statistics
+        this.totalElements += other.totalElements;
+        this.totalDiffFields += other.totalDiffFields;
+        this.documentsWithElements += other.documentsWithElements;
+        this.documentsWithDiff += other.documentsWithDiff;
         
         // Merge threshold bucket counts
         if (this.thresholdCounts != null && other.thresholdCounts != null 

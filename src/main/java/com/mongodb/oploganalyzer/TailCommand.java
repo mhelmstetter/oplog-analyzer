@@ -367,6 +367,7 @@ public class TailCommand implements Callable<Integer> {
                         accum = new EntryAccumulator(key, thresholdBuckets);
                         shardMap.put(key, accum);
                     }
+                    // For per-shard aggregation, don't track individual document stats
                     accum.addExecution(docSize);
                 }
             }
@@ -464,7 +465,9 @@ public class TailCommand implements Callable<Integer> {
                 accum = new EntryAccumulator(key, thresholdBuckets);
                 targetAccumulators.put(key, accum);
             }
-            accum.addExecution(actualSize);
+            // Calculate document statistics for this update
+            DocumentStats docStats = calculateDocumentStats(update.doc, "u");
+            accum.addExecution(actualSize, docStats.totalElements, docStats.diffFields);
             
             // Check main threshold for debug reporting
             if (actualSize >= threshold) {
@@ -492,7 +495,9 @@ public class TailCommand implements Callable<Integer> {
                 accum = new EntryAccumulator(key, thresholdBuckets);
                 targetAccumulators.put(key, accum);
             }
-            accum.addExecution(oplogSize);
+            // Calculate document statistics for this update
+            DocumentStats docStats = calculateDocumentStats(doc, opType);
+            accum.addExecution(oplogSize, docStats.totalElements, docStats.diffFields);
             
             // Track per-shard stats if enabled
             trackPerShardStats(ns, opType, oplogSize);
@@ -579,26 +584,11 @@ public class TailCommand implements Callable<Integer> {
                             String sizeDisplay = org.apache.commons.io.FileUtils.byteCountToDisplaySize(docSize);
                             
                             // Calculate diff summary if this is an update operation
+                            // Reuse the stats calculation to avoid duplication
+                            DocumentStats docStats = calculateDocumentStats(doc, opType);
                             String diffSummary = "";
-                            if ("u".equals(opType)) {
-                                BsonDocument o = (BsonDocument) doc.get("o");
-                                if (o != null && o.containsKey("diff")) {
-                                    BsonValue diffValue = o.get("diff");
-                                    if (diffValue != null && diffValue.isDocument()) {
-                                        BsonDocument diff = diffValue.asDocument();
-                                        int totalFields = diff.size();
-                                        int totalElements = 0;
-                                        for (String key : diff.keySet()) {
-                                            BsonValue fieldValue = diff.get(key);
-                                            if (fieldValue.isDocument()) {
-                                                totalElements += countBsonElements(fieldValue.asDocument());
-                                            } else if (fieldValue.isArray()) {
-                                                totalElements += countBsonArrayElements(fieldValue.asArray());
-                                            }
-                                        }
-                                        diffSummary = String.format(", %d diff fields, %d total elements", totalFields, totalElements);
-                                    }
-                                }
+                            if ("u".equals(opType) && docStats.diffFields > 0) {
+                                diffSummary = String.format(", %d diff fields, %d total elements", docStats.diffFields, docStats.totalElements);
                             }
                             
                             if (shardId != null && !shardId.isEmpty()) {
@@ -655,7 +645,10 @@ public class TailCommand implements Callable<Integer> {
                                             }
                                             // Use a portion of the total doc size for each nested op
                                             long innerDocSize = docSize / applyOps.size();
-                                            innerAccum.addExecution(innerDocSize);
+                                            // For applyOps nested operations, use the parent document for stats
+                                            // since the inner operations are part of the same RawBsonDocument
+                                            DocumentStats innerStats = calculateDocumentStats(doc, innerOpType);
+                                            innerAccum.addExecution(innerDocSize, innerStats.totalElements, innerStats.diffFields);
                                             
                                             // Track per-shard stats if enabled
                                             trackPerShardStats(innerNs, innerOpType, innerDocSize);
@@ -696,7 +689,9 @@ public class TailCommand implements Callable<Integer> {
                                 accum = new EntryAccumulator(key, thresholdBuckets);
                                 targetAccumulators.put(key, accum);
                             }
-                            accum.addExecution(docSize);
+                            // Calculate document statistics
+                            DocumentStats docStats = calculateDocumentStats(doc, opType);
+                            accum.addExecution(docSize, docStats.totalElements, docStats.diffFields);
                             
                             // Track per-shard stats if enabled
                             trackPerShardStats(ns, opType, docSize);
@@ -1244,6 +1239,51 @@ public class TailCommand implements Callable<Integer> {
             }
             // For primitive values, leave them as-is since they're already small
         }
+    }
+    
+    /**
+     * Container class for document statistics
+     */
+    private static class DocumentStats {
+        final int totalElements;
+        final int diffFields;
+        
+        DocumentStats(int totalElements, int diffFields) {
+            this.totalElements = totalElements;
+            this.diffFields = diffFields;
+        }
+    }
+    
+    /**
+     * Calculate document statistics for accumulator tracking
+     */
+    private DocumentStats calculateDocumentStats(RawBsonDocument doc, String opType) {
+        int totalElements = 0;
+        int diffFields = 0;
+        
+        // For update operations, extract diff statistics
+        if ("u".equals(opType)) {
+            BsonDocument o = (BsonDocument) doc.get("o");
+            if (o != null && o.containsKey("diff")) {
+                BsonValue diffValue = o.get("diff");
+                if (diffValue != null && diffValue.isDocument()) {
+                    BsonDocument diff = diffValue.asDocument();
+                    diffFields = diff.size();
+                    for (String key : diff.keySet()) {
+                        BsonValue fieldValue = diff.get(key);
+                        if (fieldValue.isDocument()) {
+                            totalElements += countBsonElements(fieldValue.asDocument());
+                        } else if (fieldValue.isArray()) {
+                            totalElements += countBsonArrayElements(fieldValue.asArray());
+                        }
+                    }
+                }
+            }
+        }
+        // For other operations, could count elements in the 'o' field if needed
+        // Currently only tracking diff elements for updates
+        
+        return new DocumentStats(totalElements, diffFields);
     }
     
     /**
