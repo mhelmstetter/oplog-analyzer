@@ -7,6 +7,7 @@ import static com.mongodb.client.model.Projections.include;
 
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
+import java.io.RandomAccessFile;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.nio.ByteBuffer;
@@ -214,9 +215,10 @@ public class TailCommand implements Callable<Integer> {
         private static final int MAX_BATCH_SIZE = 10;
         private static final long BATCH_TIMEOUT_MS = 100; // 100ms timeout
         
-        // Per-shard dump file channel and stream (keep stream reference to prevent GC)
-        private FileOutputStream shardOutputStream = null;
+        // Per-shard dump file using RandomAccessFile for more reliable file handling
+        private RandomAccessFile shardDumpFile = null;
         private FileChannel shardChannel = null;
+        private long dumpWriteCount = 0;
         
         public ShardTailWorker(String shardId, MongoClient mongoClient, Map<OplogEntryKey, EntryAccumulator> targetAccumulators) {
             this.shardId = shardId;
@@ -248,7 +250,7 @@ public class TailCommand implements Callable<Integer> {
                     break;
                 }
             }
-            // Close the shard dump file channel and stream if open
+            // Close the shard dump file channel and file if open
             if (shardChannel != null) {
                 try {
                     shardChannel.close();
@@ -256,20 +258,31 @@ public class TailCommand implements Callable<Integer> {
                     logger.error("[{}] Error closing dump file channel", shardId, e);
                 }
             }
-            if (shardOutputStream != null) {
+            if (shardDumpFile != null) {
                 try {
-                    shardOutputStream.close();
+                    shardDumpFile.close();
                 } catch (IOException e) {
-                    logger.error("[{}] Error closing dump file stream", shardId, e);
+                    logger.error("[{}] Error closing dump file", shardId, e);
                 }
             }
         }
         
         private void initShardDumpFile() throws IOException {
             String fileName = String.format("oplog_%s_%s.bson", shardId, dateFormat.format(new java.util.Date()));
-            shardOutputStream = new FileOutputStream(fileName, false); // false = don't append, create new
-            shardChannel = shardOutputStream.getChannel();
-            System.out.println(String.format("[%s] Dumping to file: %s", shardId, fileName));
+            try {
+                // Use RandomAccessFile for more reliable file handling
+                shardDumpFile = new RandomAccessFile(fileName, "rw");
+                shardChannel = shardDumpFile.getChannel();
+                
+                // Ensure we're at the beginning of the file
+                shardChannel.position(0);
+                
+                System.out.println(String.format("[%s] Dumping to file: %s (channel open: %s)", 
+                    shardId, fileName, shardChannel.isOpen()));
+            } catch (IOException e) {
+                logger.error("[{}] Failed to create dump file: {}", shardId, fileName, e);
+                throw e;
+            }
         }
         
         private synchronized void writeShardDump(RawBsonDocument doc) {
@@ -277,16 +290,25 @@ public class TailCommand implements Callable<Integer> {
                 try {
                     ByteBuffer buffer = doc.getByteBuffer().asNIO();
                     shardChannel.write(buffer);
+                    dumpWriteCount++;
                 } catch (ClosedChannelException e) {
                     // Channel was closed, disable further writes to stop repeated errors
-                    logger.error("[{}] Dump file channel closed, disabling dump", shardId);
+                    logger.error("[{}] Dump file channel closed unexpectedly after {} writes, disabling dump", 
+                        shardId, dumpWriteCount, e);
+                    try {
+                        if (shardDumpFile != null) {
+                            shardDumpFile.close();
+                        }
+                    } catch (IOException ioe) {
+                        // Ignore close errors
+                    }
                     shardChannel = null;
-                    shardOutputStream = null;
+                    shardDumpFile = null;
                 } catch (Exception e) {
-                    logger.error("[{}] Error writing dump", shardId, e);
+                    logger.error("[{}] Error writing dump after {} writes", shardId, dumpWriteCount, e);
                     // Disable dump on persistent errors to avoid log spam
                     shardChannel = null;
-                    shardOutputStream = null;
+                    shardDumpFile = null;
                 }
             }
         }
