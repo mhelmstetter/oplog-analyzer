@@ -92,6 +92,9 @@ public class TailCommand implements Callable<Integer> {
     @Option(names = {"-d", "--dump"}, description = "Dump BSON to output file (mongodump format)")
     private boolean dump = false;
     
+    @Option(names = {"--dumpWithShard"}, description = "Append shard name to each dumped BSON document")
+    private boolean dumpWithShard = false;
+    
     @Option(names = {"--idStats"}, description = "Enable _id statistics tracking (use --idStatsThreshold to control which documents are tracked)")
     private boolean idStats = false;
     
@@ -277,7 +280,11 @@ public class TailCommand implements Callable<Integer> {
                 shardFileStream = new FileOutputStream(fileName, false);
                 shardGzipStream = new GZIPOutputStream(shardFileStream, 8192); // 8KB buffer
                 
-                System.out.println(String.format("[%s] Dumping to compressed file: %s", shardId, fileName));
+                if (dumpWithShard) {
+                    System.out.println(String.format("[%s] Dumping to compressed file: %s (with shard field)", shardId, fileName));
+                } else {
+                    System.out.println(String.format("[%s] Dumping to compressed file: %s", shardId, fileName));
+                }
             } catch (IOException e) {
                 logger.error("[{}] Failed to create dump file: {}", shardId, fileName, e);
                 throw e;
@@ -292,7 +299,19 @@ public class TailCommand implements Callable<Integer> {
             
             if (shardGzipStream != null) {
                 try {
-                    ByteBuffer buffer = doc.getByteBuffer().asNIO();
+                    ByteBuffer buffer;
+                    if (dumpWithShard) {
+                        // Create a new document with shard field appended
+                        BsonDocument modifiedDoc = doc.clone();
+                        modifiedDoc.put("_shard", new BsonString(shardId));
+                        // Convert back to RawBsonDocument to get ByteBuffer
+                        RawBsonDocument rawModifiedDoc = new RawBsonDocument(modifiedDoc, null);
+                        buffer = rawModifiedDoc.getByteBuffer().asNIO();
+                    } else {
+                        // Use original document
+                        buffer = doc.getByteBuffer().asNIO();
+                    }
+                    
                     byte[] bytes = new byte[buffer.remaining()];
                     buffer.get(bytes);
                     shardGzipStream.write(bytes);
