@@ -1196,27 +1196,58 @@ public class TailCommand implements Callable<Integer> {
             com.google.gson.JsonElement element = diffObj.get(key);
             if (element.isJsonObject()) {
                 com.google.gson.JsonObject obj = element.getAsJsonObject();
-                int elementCount = obj.size();
+                int topLevelCount = obj.size();
+                int totalCount = countTotalElements(element);
                 
                 // Estimate size based on JSON string length (rough approximation)
                 String jsonStr = obj.toString();
                 int estimatedBytes = jsonStr.getBytes().length;
                 
                 // Replace with summary
-                diffObj.addProperty(key, String.format("<doc: %d elements, %d bytes>", elementCount, estimatedBytes));
+                diffObj.addProperty(key, String.format("<doc: %d fields, %d total elements, %d bytes>", 
+                    topLevelCount, totalCount, estimatedBytes));
             } else if (element.isJsonArray()) {
                 com.google.gson.JsonArray arr = element.getAsJsonArray();
-                int elementCount = arr.size();
+                int topLevelCount = arr.size();
+                int totalCount = countTotalElements(element);
                 
                 // Estimate size based on JSON string length
                 String jsonStr = arr.toString();
                 int estimatedBytes = jsonStr.getBytes().length;
                 
                 // Replace with summary
-                diffObj.addProperty(key, String.format("<array: %d elements, %d bytes>", elementCount, estimatedBytes));
+                diffObj.addProperty(key, String.format("<array: %d items, %d total elements, %d bytes>", 
+                    topLevelCount, totalCount, estimatedBytes));
             }
             // For primitive values, leave them as-is since they're already small
         }
+    }
+    
+    /**
+     * Count total number of elements in a JSON structure, including nested elements
+     */
+    private int countTotalElements(com.google.gson.JsonElement element) {
+        int count = 0;
+        
+        if (element.isJsonObject()) {
+            com.google.gson.JsonObject obj = element.getAsJsonObject();
+            for (String key : obj.keySet()) {
+                count++; // Count the field itself
+                count += countTotalElements(obj.get(key)); // Count nested elements
+            }
+        } else if (element.isJsonArray()) {
+            com.google.gson.JsonArray arr = element.getAsJsonArray();
+            for (com.google.gson.JsonElement item : arr) {
+                count++; // Count the array item itself
+                if (item.isJsonObject() || item.isJsonArray()) {
+                    count += countTotalElements(item) - 1; // Subtract 1 to avoid double-counting
+                }
+            }
+        } else {
+            count = 1; // Primitive value
+        }
+        
+        return count;
     }
     
     /**
