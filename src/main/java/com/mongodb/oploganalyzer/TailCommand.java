@@ -1300,21 +1300,8 @@ public class TailCommand implements Callable<Integer> {
             if (shardAccumulatorMap != null && !shardAccumulatorMap.isEmpty()) {
                 System.out.println();
                 System.out.println(String.format("--- %s ---", shardId));
-                // Only show column headers for first shard, or just show threshold bucket headers if they exist
-                if (sortedShards.indexOf(shardId) == 0 || !thresholdBuckets.isEmpty()) {
-                    if (!thresholdBuckets.isEmpty()) {
-                        // Only show threshold bucket columns since main columns are same
-                        StringBuilder thresholdHeaders = new StringBuilder();
-                        for (int i = 0; i < thresholdBuckets.size(); i++) {
-                            if (i == 0) thresholdHeaders.append(String.format("%" + (optimalNamespaceWidth + 73) + "s", ""));
-                            String thresholdLabel = String.format("> %s", org.apache.commons.io.FileUtils.byteCountToDisplaySize(thresholdBuckets.get(i)));
-                            thresholdHeaders.append(String.format(" %10s", thresholdLabel));
-                        }
-                        if (thresholdHeaders.length() > 0) {
-                            System.out.println(thresholdHeaders.toString());
-                        }
-                    }
-                }
+                // Show full headers for every shard section
+                System.out.println(EntryAccumulator.getHeaderFormat(thresholdBuckets, optimalNamespaceWidth));
                 
                 // Sort by operation count descending
                 shardAccumulatorMap.values().stream()
