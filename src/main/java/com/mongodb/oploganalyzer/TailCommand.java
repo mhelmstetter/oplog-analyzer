@@ -10,6 +10,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -266,18 +267,26 @@ public class TailCommand implements Callable<Integer> {
         
         private void initShardDumpFile() throws IOException {
             String fileName = String.format("oplog_%s_%s.bson", shardId, dateFormat.format(new java.util.Date()));
-            shardOutputStream = new FileOutputStream(fileName);
+            shardOutputStream = new FileOutputStream(fileName, false); // false = don't append, create new
             shardChannel = shardOutputStream.getChannel();
             System.out.println(String.format("[%s] Dumping to file: %s", shardId, fileName));
         }
         
-        private void writeShardDump(RawBsonDocument doc) {
-            if (shardChannel != null) {
+        private synchronized void writeShardDump(RawBsonDocument doc) {
+            if (shardChannel != null && shardChannel.isOpen()) {
                 try {
                     ByteBuffer buffer = doc.getByteBuffer().asNIO();
                     shardChannel.write(buffer);
+                } catch (ClosedChannelException e) {
+                    // Channel was closed, disable further writes to stop repeated errors
+                    logger.error("[{}] Dump file channel closed, disabling dump", shardId);
+                    shardChannel = null;
+                    shardOutputStream = null;
                 } catch (Exception e) {
                     logger.error("[{}] Error writing dump", shardId, e);
+                    // Disable dump on persistent errors to avoid log spam
+                    shardChannel = null;
+                    shardOutputStream = null;
                 }
             }
         }
