@@ -301,12 +301,19 @@ public class TailCommand implements Callable<Integer> {
                 try {
                     ByteBuffer buffer;
                     if (dumpWithShard) {
-                        // Create a new document with shard field appended
-                        BsonDocument modifiedDoc = doc.clone();
+                        // Convert RawBsonDocument to mutable BsonDocument
+                        org.bson.codecs.BsonDocumentCodec codec = new org.bson.codecs.BsonDocumentCodec();
+                        org.bson.BsonBinaryReader reader = new org.bson.BsonBinaryReader(doc.getByteBuffer().asNIO());
+                        BsonDocument modifiedDoc = codec.decode(reader, org.bson.codecs.DecoderContext.builder().build());
+                        
+                        // Add shard field
                         modifiedDoc.put("_shard", new BsonString(shardId));
-                        // Convert back to RawBsonDocument to get ByteBuffer
-                        RawBsonDocument rawModifiedDoc = new RawBsonDocument(modifiedDoc, null);
-                        buffer = rawModifiedDoc.getByteBuffer().asNIO();
+                        
+                        // Convert back to bytes for writing
+                        org.bson.io.BasicOutputBuffer outputBuffer = new org.bson.io.BasicOutputBuffer();
+                        org.bson.BsonBinaryWriter writer = new org.bson.BsonBinaryWriter(outputBuffer);
+                        codec.encode(writer, modifiedDoc, org.bson.codecs.EncoderContext.builder().build());
+                        buffer = ByteBuffer.wrap(outputBuffer.toByteArray());
                     } else {
                         // Use original document
                         buffer = doc.getByteBuffer().asNIO();
