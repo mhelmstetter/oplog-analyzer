@@ -213,7 +213,8 @@ public class TailCommand implements Callable<Integer> {
         private static final int MAX_BATCH_SIZE = 10;
         private static final long BATCH_TIMEOUT_MS = 100; // 100ms timeout
         
-        // Per-shard dump file channel
+        // Per-shard dump file channel and stream (keep stream reference to prevent GC)
+        private FileOutputStream shardOutputStream = null;
         private FileChannel shardChannel = null;
         
         public ShardTailWorker(String shardId, MongoClient mongoClient, Map<OplogEntryKey, EntryAccumulator> targetAccumulators) {
@@ -226,7 +227,9 @@ public class TailCommand implements Callable<Integer> {
                 try {
                     initShardDumpFile();
                 } catch (IOException e) {
-                    logger.error("[{}] Failed to initialize dump file: {}", shardId, e.getMessage());
+                    logger.error("[{}] Failed to initialize dump file", shardId, e);
+                    // Set channel to null to prevent further write attempts
+                    shardChannel = null;
                 }
             }
         }
@@ -244,20 +247,27 @@ public class TailCommand implements Callable<Integer> {
                     break;
                 }
             }
-            // Close the shard dump file channel if open
+            // Close the shard dump file channel and stream if open
             if (shardChannel != null) {
                 try {
                     shardChannel.close();
                 } catch (IOException e) {
-                    logger.error("[{}] Error closing dump file channel: {}", shardId, e.getMessage());
+                    logger.error("[{}] Error closing dump file channel", shardId, e);
+                }
+            }
+            if (shardOutputStream != null) {
+                try {
+                    shardOutputStream.close();
+                } catch (IOException e) {
+                    logger.error("[{}] Error closing dump file stream", shardId, e);
                 }
             }
         }
         
         private void initShardDumpFile() throws IOException {
             String fileName = String.format("oplog_%s_%s.bson", shardId, dateFormat.format(new java.util.Date()));
-            FileOutputStream outputStream = new FileOutputStream(fileName);
-            shardChannel = outputStream.getChannel();
+            shardOutputStream = new FileOutputStream(fileName);
+            shardChannel = shardOutputStream.getChannel();
             System.out.println(String.format("[%s] Dumping to file: %s", shardId, fileName));
         }
         
@@ -267,7 +277,7 @@ public class TailCommand implements Callable<Integer> {
                     ByteBuffer buffer = doc.getByteBuffer().asNIO();
                     shardChannel.write(buffer);
                 } catch (Exception e) {
-                    logger.error("[{}] Error writing dump: {}", shardId, e.getMessage());
+                    logger.error("[{}] Error writing dump", shardId, e);
                 }
             }
         }
