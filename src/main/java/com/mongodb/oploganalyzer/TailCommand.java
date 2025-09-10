@@ -1245,9 +1245,14 @@ public class TailCommand implements Callable<Integer> {
     
     public void report() {
         System.out.println();
-        System.out.println(EntryAccumulator.getHeaderFormat(thresholdBuckets));
+        
+        // Calculate optimal namespace width based on actual data
+        int optimalNamespaceWidth = calculateOptimalNamespaceWidth();
+        
+        System.out.println(EntryAccumulator.getHeaderFormat(thresholdBuckets, optimalNamespaceWidth));
+        System.out.println(EntryAccumulator.getSeparatorLine(thresholdBuckets, optimalNamespaceWidth));
         accumulators.values().stream().sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
-                .forEach(acc -> System.out.println(acc));
+                .forEach(acc -> System.out.println(acc.toString(optimalNamespaceWidth)));
         
         if (idStats && !idStatsCache.asMap().isEmpty()) {
             printIdStatistics();
@@ -1258,9 +1263,34 @@ public class TailCommand implements Callable<Integer> {
         }
     }
     
+    private int calculateOptimalNamespaceWidth() {
+        // Find the longest namespace in both global and per-shard data
+        int maxLength = 0;
+        
+        // Check global accumulators
+        for (OplogEntryKey key : accumulators.keySet()) {
+            maxLength = Math.max(maxLength, key.ns.length());
+        }
+        
+        // Check per-shard accumulators if they exist
+        if (perShardStats != null) {
+            for (Map<OplogEntryKey, EntryAccumulator> shardMap : perShardStats.values()) {
+                for (OplogEntryKey key : shardMap.keySet()) {
+                    maxLength = Math.max(maxLength, key.ns.length());
+                }
+            }
+        }
+        
+        // Set reasonable bounds: minimum 25, maximum 60, prefer actual length + small buffer
+        return Math.min(60, Math.max(25, maxLength + 2));
+    }
+    
     private void printPerShardStatistics() {
         System.out.println();
         System.out.println("=== PER-SHARD BREAKDOWN ===");
+        
+        // Calculate optimal namespace width for shard data
+        int optimalNamespaceWidth = calculateOptimalNamespaceWidth();
         
         // Sort shards by name for consistent output
         List<String> sortedShards = perShardStats.keySet().stream().sorted().collect(Collectors.toList());
@@ -1270,13 +1300,26 @@ public class TailCommand implements Callable<Integer> {
             if (shardAccumulatorMap != null && !shardAccumulatorMap.isEmpty()) {
                 System.out.println();
                 System.out.println(String.format("--- %s ---", shardId));
-                System.out.println(String.format("%-80s %5s %15s %15s %15s %15s %30s", "Namespace", "op", "count", "min", "max",
-                        "avg", "total (size)"));
+                // Only show column headers for first shard, or just show threshold bucket headers if they exist
+                if (sortedShards.indexOf(shardId) == 0 || !thresholdBuckets.isEmpty()) {
+                    if (!thresholdBuckets.isEmpty()) {
+                        // Only show threshold bucket columns since main columns are same
+                        StringBuilder thresholdHeaders = new StringBuilder();
+                        for (int i = 0; i < thresholdBuckets.size(); i++) {
+                            if (i == 0) thresholdHeaders.append(String.format("%" + (optimalNamespaceWidth + 73) + "s", ""));
+                            String thresholdLabel = String.format("> %s", org.apache.commons.io.FileUtils.byteCountToDisplaySize(thresholdBuckets.get(i)));
+                            thresholdHeaders.append(String.format(" %10s", thresholdLabel));
+                        }
+                        if (thresholdHeaders.length() > 0) {
+                            System.out.println(thresholdHeaders.toString());
+                        }
+                    }
+                }
                 
                 // Sort by operation count descending
                 shardAccumulatorMap.values().stream()
                     .sorted(Comparator.comparingLong(EntryAccumulator::getCount).reversed())
-                    .forEach(acc -> System.out.println(acc));
+                    .forEach(acc -> System.out.println(acc.toString(optimalNamespaceWidth)));
                 
                 // Summary for this shard
                 long totalOps = shardAccumulatorMap.values().stream().mapToLong(EntryAccumulator::getCount).sum();

@@ -51,14 +51,18 @@ public class EntryAccumulator {
     }
     
     public String toString() {
+        return toString(50); // Default namespace width
+    }
+    
+    public String toString(int namespaceWidth) {
         NumberFormat nf = NumberFormat.getInstance(Locale.US);
         String totalWithSize = String.format("%s (%s)", 
             nf.format(total), 
             FileUtils.byteCountToDisplaySize(total));
         
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format("%-80s %5s %15s %15s %15s %15s %30s", 
-            key.ns, 
+        sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %18s", 
+            truncateNamespace(key.ns, namespaceWidth), 
             key.op, 
             nf.format(count), 
             nf.format(min), 
@@ -68,21 +72,51 @@ public class EntryAccumulator {
         
         // Add threshold bucket columns
         for (Long thresholdCount : thresholdCounts) {
-            sb.append(String.format(" %15s", nf.format(thresholdCount)));
+            sb.append(String.format(" %10s", nf.format(thresholdCount)));
         }
         
         return sb.toString();
     }
     
+    private String truncateNamespace(String namespace, int maxWidth) {
+        if (namespace.length() <= maxWidth) {
+            return namespace;
+        }
+        // Truncate from the middle, keeping beginning and end
+        int keepStart = Math.max(15, maxWidth / 3);
+        int keepEnd = Math.max(10, maxWidth / 4);
+        if (keepStart + keepEnd + 3 >= maxWidth) {
+            return namespace.substring(0, maxWidth - 3) + "...";
+        }
+        return namespace.substring(0, keepStart) + "..." + namespace.substring(namespace.length() - keepEnd);
+    }
+    
     public static String getHeaderFormat(List<Long> thresholdBuckets) {
+        return getHeaderFormat(thresholdBuckets, 50); // Default namespace width
+    }
+    
+    public static String getHeaderFormat(List<Long> thresholdBuckets, int namespaceWidth) {
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format("%-80s %5s %15s %15s %15s %15s %30s", 
+        sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %18s", 
             "Namespace", "op", "count", "min", "max", "avg", "total (size)"));
         
         // Add threshold bucket headers
         for (Long threshold : thresholdBuckets) {
             String thresholdLabel = String.format("> %s", FileUtils.byteCountToDisplaySize(threshold));
-            sb.append(String.format(" %15s", thresholdLabel));
+            sb.append(String.format(" %10s", thresholdLabel));
+        }
+        
+        return sb.toString();
+    }
+    
+    public static String getSeparatorLine(List<Long> thresholdBuckets, int namespaceWidth) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %18s", 
+            "=".repeat(namespaceWidth), "==", "==========", "==========", "==========", "==========", "=================="));
+        
+        // Add threshold bucket separators
+        for (Long threshold : thresholdBuckets) {
+            sb.append(String.format(" %10s", "=========="));
         }
         
         return sb.toString();
