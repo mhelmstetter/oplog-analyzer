@@ -1219,8 +1219,7 @@ public class TailCommand implements Callable<Integer> {
     
     private void writeDump(RawBsonDocument doc) {
         try {
-            byte[] bytes = doc.getByteBuffer().array();
-            ByteBuffer buffer = ByteBuffer.wrap(bytes);
+            ByteBuffer buffer = doc.getByteBuffer().asNIO();
             channel.write(buffer);
         } catch (Exception e) {
             logger.error("Error writing dump", e);
