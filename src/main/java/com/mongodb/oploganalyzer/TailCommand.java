@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.StringWriter;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.FileChannel;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -250,21 +251,17 @@ public class TailCommand implements Callable<Integer> {
                     break;
                 }
             }
-            // Close the shard dump file channel and file if open
-            if (shardChannel != null) {
+            // Flush and close the shard dump file properly
+            if (shardChannel != null && shardChannel.isOpen()) {
                 try {
-                    shardChannel.close();
+                    // Force any remaining data to disk before closing
+                    shardChannel.force(true);
+                    logger.debug("[{}] Flushed and closing dump file after {} writes", shardId, dumpWriteCount);
                 } catch (IOException e) {
-                    logger.error("[{}] Error closing dump file channel", shardId, e);
+                    logger.debug("[{}] Error flushing dump file", shardId, e);
                 }
             }
-            if (shardDumpFile != null) {
-                try {
-                    shardDumpFile.close();
-                } catch (IOException e) {
-                    logger.error("[{}] Error closing dump file", shardId, e);
-                }
-            }
+            closeShardDumpFile();
         }
         
         private void initShardDumpFile() throws IOException {
@@ -286,31 +283,47 @@ public class TailCommand implements Callable<Integer> {
         }
         
         private synchronized void writeShardDump(RawBsonDocument doc) {
+            // Check if we're shutting down or interrupted
+            if (!running.get() || Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            
             if (shardChannel != null && shardChannel.isOpen()) {
                 try {
                     ByteBuffer buffer = doc.getByteBuffer().asNIO();
                     shardChannel.write(buffer);
                     dumpWriteCount++;
+                    
+                    // Periodically force data to disk to prevent data loss
+                    if (dumpWriteCount % 100 == 0) {
+                        shardChannel.force(false);
+                    }
+                } catch (ClosedByInterruptException e) {
+                    // Thread was interrupted during write - this is expected during shutdown
+                    logger.debug("[{}] Dump write interrupted during shutdown after {} writes", shardId, dumpWriteCount);
+                    closeShardDumpFile();
                 } catch (ClosedChannelException e) {
-                    // Channel was closed, disable further writes to stop repeated errors
+                    // Channel was closed for another reason
                     logger.error("[{}] Dump file channel closed unexpectedly after {} writes, disabling dump", 
                         shardId, dumpWriteCount, e);
-                    try {
-                        if (shardDumpFile != null) {
-                            shardDumpFile.close();
-                        }
-                    } catch (IOException ioe) {
-                        // Ignore close errors
-                    }
-                    shardChannel = null;
-                    shardDumpFile = null;
+                    closeShardDumpFile();
                 } catch (Exception e) {
                     logger.error("[{}] Error writing dump after {} writes", shardId, dumpWriteCount, e);
-                    // Disable dump on persistent errors to avoid log spam
-                    shardChannel = null;
-                    shardDumpFile = null;
+                    closeShardDumpFile();
                 }
             }
+        }
+        
+        private void closeShardDumpFile() {
+            try {
+                if (shardDumpFile != null) {
+                    shardDumpFile.close();
+                }
+            } catch (IOException e) {
+                // Ignore close errors
+            }
+            shardChannel = null;
+            shardDumpFile = null;
         }
         
         public int getPendingUpdatesCount() {
