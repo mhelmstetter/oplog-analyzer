@@ -100,6 +100,9 @@ public class TailCommand implements Callable<Integer> {
     @Option(names = {"--thresholdBuckets"}, description = "Comma-separated list of byte thresholds for counting operations (e.g., 100000,1000000 for 100KB,1MB)", split = ",")
     private List<Long> thresholdBuckets = new ArrayList<>();
     
+    @Option(names = {"--includeNamespace"}, description = "Only process operations for these namespaces (can be specified multiple times)", arity = "1..*")
+    private List<String> includeNamespaces = new ArrayList<>();
+    
     private ShardClient shardClient;
     private boolean shutdown = false;
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new ConcurrentHashMap<OplogEntryKey, EntryAccumulator>();
@@ -417,6 +420,11 @@ public class TailCommand implements Callable<Integer> {
                         if (ns.startsWith("config.")) {
                             continue;
                         }
+                        
+                        // Filter by included namespaces if specified
+                        if (!includeNamespaces.isEmpty() && !includeNamespaces.contains(ns)) {
+                            continue;
+                        }
 
                         long docSize = doc.getByteBuffer().remaining();
                         
@@ -441,7 +449,8 @@ public class TailCommand implements Callable<Integer> {
                                         String innerNs = innerOp.getString("ns", new BsonString("unknown")).getValue();
                                         String innerOpType = innerOp.getString("op", new BsonString("unknown")).getValue();
                                         
-                                        if (!innerNs.startsWith("config.")) {
+                                        if (!innerNs.startsWith("config.") && 
+                                            (includeNamespaces.isEmpty() || includeNamespaces.contains(innerNs))) {
                                             OplogEntryKey innerKey = new OplogEntryKey(innerNs, innerOpType);
                                             EntryAccumulator innerAccum = targetAccumulators.get(innerKey);
                                             if (innerAccum == null) {
