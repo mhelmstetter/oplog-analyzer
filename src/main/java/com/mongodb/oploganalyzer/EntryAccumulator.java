@@ -56,19 +56,17 @@ public class EntryAccumulator {
     
     public String toString(int namespaceWidth) {
         NumberFormat nf = NumberFormat.getInstance(Locale.US);
-        String totalWithSize = String.format("%s (%s)", 
-            nf.format(total), 
-            FileUtils.byteCountToDisplaySize(total));
+        String totalSize = FileUtils.byteCountToDisplaySize(total);
         
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %18s", 
+        sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %12s", 
             truncateNamespace(key.ns, namespaceWidth), 
             key.op, 
             nf.format(count), 
             nf.format(min), 
             nf.format(max), 
             nf.format(total/count), 
-            totalWithSize));
+            totalSize));
         
         // Add threshold bucket columns
         for (Long thresholdCount : thresholdCounts) {
@@ -97,8 +95,8 @@ public class EntryAccumulator {
     
     public static String getHeaderFormat(List<Long> thresholdBuckets, int namespaceWidth) {
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %18s", 
-            "Namespace", "op", "count", "min", "max", "avg", "total (size)"));
+        sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %12s", 
+            "Namespace", "op", "count", "min", "max", "avg", "total size"));
         
         // Add threshold bucket headers
         for (Long threshold : thresholdBuckets) {
@@ -111,8 +109,8 @@ public class EntryAccumulator {
     
     public static String getSeparatorLine(List<Long> thresholdBuckets, int namespaceWidth) {
         StringBuilder sb = new StringBuilder();
-        sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %18s", 
-            "=".repeat(namespaceWidth), "==", "==========", "==========", "==========", "==========", "=================="));
+        sb.append(String.format("%-" + namespaceWidth + "s %2s %10s %10s %10s %10s %12s", 
+            "=".repeat(namespaceWidth), "==", "==========", "==========", "==========", "==========", "============"));
         
         // Add threshold bucket separators
         for (Long threshold : thresholdBuckets) {
