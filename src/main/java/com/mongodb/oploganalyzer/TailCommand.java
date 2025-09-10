@@ -591,7 +591,7 @@ public class TailCommand implements Callable<Integer> {
                     shardId, String.format("%,d", count), finalLagSeconds);
                 
             } catch (MongoInterruptedException e) {
-                logger.debug("[{}] MongoDB interrupted: {}", shardId, e.getMessage());
+                // Silently handle interruptions during shutdown - no need to log noise
             } catch (Exception e) {
                 logger.error("[{}] Error during tailing: {}", shardId, e.getMessage(), e);
             } finally {
