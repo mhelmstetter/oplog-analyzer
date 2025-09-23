@@ -840,6 +840,7 @@ public class TailCommand implements Callable<Integer> {
                         System.out.println("\n>>> Graceful shutdown initiated... (press Ctrl-C again to force quit)");
                         // First attempt - start graceful shutdown immediately
                         handleShutdown();
+                        System.exit(0);
                     } else if (shutdownAttempts == 2) {
                         System.out.println("\n>>> Forcing shutdown... (press Ctrl-C once more for immediate termination)");
                         forceShutdown();
