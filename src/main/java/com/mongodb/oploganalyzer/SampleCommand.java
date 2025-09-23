@@ -67,7 +67,7 @@ public class SampleCommand extends BaseOplogCommand {
     private String statsFormat = "json";
     
     private ShardClient shardClient;
-    private boolean shutdown = false;
+    private volatile boolean shutdown = false;
     
     // Per-shard per-namespace ID sampling cache
     private final Map<String, Map<String, Set<String>>> shardNamespaceIdCache = new ConcurrentHashMap<>();

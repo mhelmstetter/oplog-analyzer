@@ -61,13 +61,17 @@ oplog-analyzer <subcommand> [options]
 
 ### Available Subcommands
 
-- `tail` - Monitor oplog entries in real-time (**recommended** - more efficient)
-- `scan` - Analyze historical oplog entries within a time range (resource intensive)
+- `tail` - Monitor oplog entries in real-time as they occur. This is the **recommended** approach for active monitoring as current oplog entries are likely cached in memory, making it more efficient than scanning historical data
+- `scan` - Analyze historical oplog entries within a specific time range. This is more resource-intensive as it requires reading through the oplog history
+- `sample` - Collect representative oplog samples per shard and namespace with compressed output for efficient workload pattern analysis
+- `analyze` - Analyze oplog dump files (BSON format) to detect workload patterns and identify potential shard key distribution issues
 
 ### Global Options
 
-- `--help` - Show help message
-- `--version` - Show version information
+These options are truly global and available for all subcommands:
+
+- `--help` - Show help message and available options for the command or subcommand
+- `--version` - Display the version information (currently 0.0.1-SNAPSHOT)
 
 ## Tail Command (Real-time Monitoring)
 
@@ -83,15 +87,19 @@ oplog-analyzer tail [options]
 
 | Option | Description | Required | Default |
 |--------|-------------|----------|---------|
-| `-c, --uri <uri>` | MongoDB connection string | Yes | - |
+| `-c, --uri <uri>` | MongoDB connection string | No* | - |
+| `-f, --file <path>` | BSON or gzipped BSON file to analyze (.bson or .bson.gz) | No* | - |
 | `-t, --threshold <bytes>` | Only show operations >= this size for debug output | No | MAX_VALUE |
 | `-l, --limit <count>` | Stop after examining this many entries | No | unlimited |
-| `-d, --dump` | Dump BSON to output file | No | false |
+| `-d, --dump` | Dump BSON to output file (mongodump format) | No | false |
+| `--dumpWithShard` | Append shard name to each dumped BSON document | No | false |
 | `--idStats` | Enable _id statistics tracking | No | false |
 | `--idStatsThreshold <bytes>` | Minimum size for documents to include in ID statistics | No | 0 |
 | `--fetchDocSizes` | Fetch actual document sizes for updates (slower but accurate) | No | false |
 | `--topIdCount <n>` | Number of top frequent _id values to report | No | 20 |
 | `--shardIndex <indices>` | Comma-separated shard indices to analyze (e.g., 0,1,2) | No | all shards |
+
+*Note: Either `-c` (MongoDB URI) or `-f` (BSON file) must be provided
 
 ### Examples
 
@@ -211,11 +219,21 @@ oplog-analyzer scan [options]
 
 | Option | Description | Required | Default |
 |--------|-------------|----------|---------|
-| `-c, --uri <uri>` | MongoDB connection string | Yes | - |
+| `-c, --uri <uri>` | MongoDB connection string | No* | - |
+| `-f, --file <path>` | BSON or gzipped BSON file to analyze (.bson or .bson.gz) | No* | - |
 | `-t, --threshold <bytes>` | Only show operations >= this size | No | MAX_VALUE |
-| `-s, --startTime <timestamp>` | Start time (ISO 8601 format) | No | - |
-| `-e, --endTime <timestamp>` | End time (ISO 8601 format) | No | - |
+| `-s, --startTime <timestamp>` | Start time (yyyy-MM-ddTHH:mm.sssZ format) | No | - |
+| `-e, --endTime <timestamp>` | End time (yyyy-MM-ddTHH:mm.sssZ format) | No | - |
 | `-d, --db <database>` | Database name to query | No | local |
+| `-x, --sheet <name>` | Excel sheet name for output | No | - |
+| `--idStats` | Enable _id statistics tracking | No | false |
+| `--idStatsThreshold <bytes>` | Minimum size for documents to include in ID statistics | No | 0 |
+| `--topIdCount <n>` | Number of top frequent _id values to report | No | 20 |
+| `--fetchDocSizes` | Fetch actual document sizes for updates (slower but accurate) | No | false |
+| `--shardIndex <indices>` | Comma-separated shard indices to analyze (e.g., 0,1,2) | No | all shards |
+| `--verbose` | Enable verbose logging for troubleshooting | No | false |
+
+*Note: Either `-c` (MongoDB URI) or `-f` (BSON file) must be provided
 
 ### Examples
 
@@ -236,6 +254,117 @@ oplog-analyzer scan -c mongodb://localhost:27017 \
   -d myDatabase \
   -s 2025-01-01T00:00:00Z
 ```
+
+## Sample Command (Workload Sampling)
+
+Collect representative oplog samples per shard and namespace with compressed output for efficient workload pattern analysis. This command is particularly useful for gathering data for offline analysis or sharing workload patterns without exposing sensitive data.
+
+### Syntax
+
+```bash
+oplog-analyzer sample [options]
+```
+
+### Options
+
+| Option | Description | Required | Default |
+|--------|-------------|----------|---------|
+| `-c, --uri <uri>` | MongoDB connection string | No* | - |
+| `-f, --file <path>` | BSON or gzipped BSON file to analyze (.bson or .bson.gz) | No* | - |
+| `-t, --threshold <bytes>` | Log operations >= this size (bytes) | No | MAX_VALUE |
+| `--idSampleSize <n>` | Number of _id values to sample per shard/namespace | No | 100 |
+| `--compress` | Compress output BSON file with gzip | No | true |
+| `--statusInterval <seconds>` | Status report interval in seconds | No | 30 |
+| `--shardStats` | Track and report full per-shard statistics alongside sampling | No | true |
+| `--statsFormat` | Format for stats report output: json or bson | No | json |
+| `--idStats` | Enable _id statistics tracking | No | false |
+| `--idStatsThreshold <bytes>` | Minimum size for documents to include in ID statistics | No | 0 |
+| `--topIdCount <n>` | Number of top frequent _id values to report | No | 20 |
+| `--fetchDocSizes` | Fetch actual document sizes for updates | No | false |
+| `--shardIndex <indices>` | Comma-separated shard indices to analyze | No | all shards |
+
+*Note: Either `-c` (MongoDB URI) or `-f` (BSON file) must be provided
+
+### Examples
+
+```bash
+# Sample oplog from a sharded cluster with default settings
+oplog-analyzer sample -c mongodb+srv://user:pass@cluster.net/
+
+# Sample with larger ID sample size and JSON statistics
+oplog-analyzer sample -c mongodb://localhost:27017 \
+  --idSampleSize 500 \
+  --statsFormat json
+
+# Sample specific shards only
+oplog-analyzer sample -c mongodb+srv://user:pass@cluster.net/ \
+  --shardIndex 0,2,4 \
+  --compress true
+
+# Sample with full statistics tracking
+oplog-analyzer sample -c mongodb://localhost:27017 \
+  --shardStats true \
+  --idStats \
+  --fetchDocSizes
+```
+
+### Output Files
+
+The sample command generates:
+- Compressed BSON files per shard (e.g., `oplog_sample_shard-0_2025-01-01_12-00-00.bson.gz`)
+- Statistics report in JSON or BSON format with detailed workload patterns per namespace
+
+## Analyze Command (Pattern Detection)
+
+Analyze oplog dump files (typically from the `sample` command) to detect workload patterns and identify potential shard key distribution issues. This command performs offline analysis on BSON dumps without requiring a MongoDB connection.
+
+### Syntax
+
+```bash
+oplog-analyzer analyze [options] [files...]
+```
+
+### Options
+
+| Option | Description | Required | Default |
+|--------|-------------|----------|---------|
+| `[files]` | BSON dump files to analyze (.bson or .bson.gz) | No | - |
+| `--pattern` | File pattern to match in current directory (e.g., '*.bson') | No | *.bson* |
+| `--shardKeyAnalysis` | Perform detailed shard key distribution analysis | No | true |
+| `--workloadGrouping` | Group and classify workload patterns | No | true |
+| `--statsFile` | JSON stats report file from sample command | No | - |
+
+### Examples
+
+```bash
+# Analyze all BSON files in current directory
+oplog-analyzer analyze
+
+# Analyze specific dump files
+oplog-analyzer analyze oplog_sample_*.bson.gz
+
+# Analyze with pattern matching
+oplog-analyzer analyze --pattern "oplog_*shard-0*.bson.gz"
+
+# Analyze with stats file from sample command
+oplog-analyzer analyze \
+  --statsFile sample_stats.json \
+  oplog_sample_*.bson.gz
+
+# Skip shard key analysis
+oplog-analyzer analyze \
+  --shardKeyAnalysis false \
+  --workloadGrouping true
+```
+
+### Analysis Output
+
+The analyze command provides:
+- **Workload Classification**: Identifies patterns like "heavy-updates", "frequent-small", "mixed"
+- **Shard Key Analysis**: Detects potential hot spots and uneven distribution
+- **ID Update Frequency**: Shows which document IDs are most frequently modified
+- **Per-Shard Statistics**: Breaks down operations by shard showing imbalances
+- **Namespace Patterns**: Groups operations by collection and operation type
 
 ## Connection String Examples
 

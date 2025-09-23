@@ -123,7 +123,7 @@ public class TailCommand implements Callable<Integer> {
     private List<String> includeOperations = new ArrayList<>();
     
     private ShardClient shardClient;
-    private boolean shutdown = false;
+    private volatile boolean shutdown = false;
     private Map<OplogEntryKey, EntryAccumulator> accumulators = new ConcurrentHashMap<OplogEntryKey, EntryAccumulator>();
     
     // Global timestamp for all dump files to prevent filename changes during run
@@ -307,7 +307,7 @@ public class TailCommand implements Callable<Integer> {
                         BsonDocument modifiedDoc = codec.decode(reader, org.bson.codecs.DecoderContext.builder().build());
                         
                         // Add shard field
-                        modifiedDoc.put("_shard", new BsonString(shardId));
+                        modifiedDoc.put("shard", new BsonString(shardId));
                         
                         // Convert back to bytes for writing
                         org.bson.io.BasicOutputBuffer outputBuffer = new org.bson.io.BasicOutputBuffer();

@@ -66,7 +66,7 @@ public abstract class BaseOplogCommand implements Callable<Integer> {
     protected Map<OplogEntryKey, EntryAccumulator> accumulators = new ConcurrentHashMap<>();
     protected IdStatisticsManager idStatisticsManager;
     protected ShardClient shardClient;
-    protected boolean stop = false;
+    protected volatile boolean stop = false;
     
     /**
      * Initialize common components
