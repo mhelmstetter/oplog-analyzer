@@ -1521,15 +1521,12 @@ public class TailCommand implements Callable<Integer> {
                 cacheSize = idStatsCache.estimatedSize();
             }
             
-            // Log memory stats every 5 seconds at DEBUG level with data structure info
-            logger.debug("Memory: Used={} MB ({}%), Free={} MB, Max={} MB | Accumulators={}, Cache={}, PendingUpdates={} | Docs={}, TotalBytes={} MB", 
+            // Log memory stats every 5 seconds at DEBUG level
+            logger.debug("Memory: Used={} MB ({}%), Free={} MB, Max={} MB | Docs={}, TotalBytes={} MB",
                 usedMemory / (1024 * 1024),
                 String.format("%.1f", usedPercent),
                 freeMemory / (1024 * 1024),
                 maxMemory / (1024 * 1024),
-                totalAccumulators,
-                cacheSize,
-                totalPendingUpdates,
                 totalDocsProcessed,
                 totalBytesProcessed / (1024 * 1024));
             
@@ -1630,7 +1627,7 @@ public class TailCommand implements Callable<Integer> {
             maxMemory / (1024 * 1024));
     }
     
-    public void report() {
+    public synchronized void report() {
         System.out.println();
         
         // Calculate optimal namespace width based on actual data
